@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>parser tests</title>
+<style>
+  body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin: 1rem; }
+  pre { white-space: pre-wrap; }
+  .PASS { color: #1a7f37; }
+  .FAIL { color: #cf222e; font-weight: 700; }
+  #summary { font-weight: 700; margin-top: .75rem; font-size: 1.1rem; }
+  #summary.ok { color: #1a7f37; }
+  #summary.bad { color: #cf222e; }
+</style>
+</head>
+<body>
+<h1>parser.js regression tests</h1>
+<div id="results"></div>
+<div id="summary"></div>
+<script type="module">
+import { parseNetscape } from '../js/parser.js';
+
+// --- Fixture: Chrome bookmarks export (verbatim; note the explicitly-closed </DT> before "Reading"). ---
+const fixture = `<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">
+<TITLE>Bookmarks</TITLE>
+<H1>Bookmarks</H1>
+<DL><p>
+    <DT><H3 ADD_DATE="1700000000" LAST_MODIFIED="1700000100" PERSONAL_TOOLBAR_FOLDER="true">Bookmarks bar</H3>
+    <DL><p>
+        <DT><A HREF="https://example.com/" ADD_DATE="1700000001" ICON="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC">Example &amp; Co</A>
+        <DT><A HREF="https://example.com/" ADD_DATE="1700000002">Example (dupe)</A>
+        <DT><A HREF="javascript:void(0)" ADD_DATE="1700000003">Bookmarklet</A>
+        <DT><H3 ADD_DATE="1700000004">Dev</H3>
+        <DL><p>
+            <DT><A HREF="https://github.com/" ADD_DATE="1700000005">GitHub</A>
+            <DT><H3 ADD_DATE="1700000006">Frontend</H3>
+            <DL><p>
+                <DT><A HREF="https://developer.mozilla.org/en-US/" ADD_DATE="1700000007">MDN</A>
+                <DT><H3 ADD_DATE="1700000008">Frameworks</H3>
+                <DL><p>
+                    <DT><A HREF="https://react.dev/" ADD_DATE="1700000009">React</A>
+                </DL><p>
+            </DL><p>
+        </DL><p>
+        <DT><H3 ADD_DATE="1700000010">Empty</H3>
+        <DL><p>
+        </DL><p>
+    </DL><p>
+    <DT><H3 ADD_DATE="1700000011">Other bookmarks</H3>
+    <DL><p>
+        <DT><A HREF="https://xn--n3h.com/" ADD_DATE="1700000012">Snowman IDN</A>
+        <DT><A HREF="not a valid url" ADD_DATE="1700000013">Broken</A>
+        <DT><H3 ADD_DATE="1700000014">Reading</H3></DT>
+        <DL><p>
+            <DT><A HREF="https://www.wikipedia.org/" ADD_DATE="1700000015">Wikipedia</A>
+        </DL><p>
+    </DL><p>
+</DL><p>
+`;
+
+// --- Tiny assertion harness (writes to page + console). ---
+const lines = [];
+let failures = 0;
+function check(name, cond) {
+  const pass = !!cond;
+  if (!pass) failures++;
+  const status = pass ? 'PASS' : 'FAIL';
+  lines.push({ status, name });
+  console.log(status + ' — ' + name);
+}
+function arrEq(a, b) {
+  return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+// ============================ Structured Chrome fixture ============================
+const r = parseNetscape(fixture);
+const b = (r && r.bookmarks) || [];
+
+check('ok === true', r.ok === true);
+check('bookmarks.length === 6', b.length === 6);
+check('skipped === 2', r.skipped === 2);
+check('folderCount === 6', r.folderCount === 6);
+
+// [0] Example & Co (entity decoded), base64 icon, root path
+check("[0] title 'Example & Co' (entity decoded)", b[0] && b[0].title === 'Example & Co');
+check('[0] url https://example.com/', b[0] && b[0].url === 'https://example.com/');
+check('[0] domain example.com', b[0] && b[0].domain === 'example.com');
+check('[0] path []', b[0] && arrEq(b[0].path, []));
+check('[0] icon startsWith data:image/', b[0] && typeof b[0].icon === 'string' && b[0].icon.startsWith('data:image/'));
+check('[0] addDate 1700000001', b[0] && b[0].addDate === 1700000001);
+
+// [1] GitHub @ Dev
+check('[1] title GitHub', b[1] && b[1].title === 'GitHub');
+check('[1] domain github.com', b[1] && b[1].domain === 'github.com');
+check("[1] path ['Dev']", b[1] && arrEq(b[1].path, ['Dev']));
+check('[1] addDate 1700000005', b[1] && b[1].addDate === 1700000005);
+
+// [2] MDN @ Dev/Frontend
+check('[2] title MDN', b[2] && b[2].title === 'MDN');
+check('[2] domain developer.mozilla.org', b[2] && b[2].domain === 'developer.mozilla.org');
+check("[2] path ['Dev','Frontend']", b[2] && arrEq(b[2].path, ['Dev', 'Frontend']));
+check('[2] url https://developer.mozilla.org/en-US/', b[2] && b[2].url === 'https://developer.mozilla.org/en-US/');
+
+// [3] React @ Dev/Frontend/Frameworks
+check('[3] title React', b[3] && b[3].title === 'React');
+check('[3] domain react.dev', b[3] && b[3].domain === 'react.dev');
+check("[3] path ['Dev','Frontend','Frameworks']", b[3] && arrEq(b[3].path, ['Dev', 'Frontend', 'Frameworks']));
+
+// [4] Snowman IDN @ Other bookmarks
+check('[4] title Snowman IDN', b[4] && b[4].title === 'Snowman IDN');
+check('[4] domain xn--n3h.com', b[4] && b[4].domain === 'xn--n3h.com');
+check("[4] path ['Other bookmarks']", b[4] && arrEq(b[4].path, ['Other bookmarks']));
+
+// [5] Wikipedia @ Other bookmarks/Reading (sibling DL after explicit </DT>)
+check('[5] title Wikipedia', b[5] && b[5].title === 'Wikipedia');
+check('[5] url https://www.wikipedia.org/', b[5] && b[5].url === 'https://www.wikipedia.org/');
+check('[5] domain wikipedia.org', b[5] && b[5].domain === 'wikipedia.org');
+check("[5] path ['Other bookmarks','Reading']", b[5] && arrEq(b[5].path, ['Other bookmarks', 'Reading']));
+
+// Cross-cutting invariants
+check('exactly one record url https://example.com/', b.filter((x) => x.url === 'https://example.com/').length === 1);
+check('no record url starting javascript:', b.every((x) => !x.url.startsWith('javascript:')));
+check('every url startsWith http', b.every((x) => x.url.startsWith('http')));
+check('orders contiguous [0,1,2,3,4,5]', arrEq(b.map((x) => x.order), [0, 1, 2, 3, 4, 5]));
+
+// ============================ Negative / edge cases ============================
+const empty = parseNetscape('');
+check("parseNetscape('') → ok:false", empty.ok === false);
+check("parseNetscape('') → canonical error string",
+  empty.error === "That file doesn't look like a Chrome bookmarks export");
+
+let nullRes, threw = false;
+try { nullRes = parseNetscape(null); } catch (_e) { threw = true; }
+check('parseNetscape(null) does not throw', threw === false);
+check('parseNetscape(null) → ok:false', nullRes && nullRes.ok === false);
+
+const flat = parseNetscape('<html><body><a href="https://a.com">A</a><a href="javascript:1">x</a></body></html>');
+check('flat scan → ok:true', flat.ok === true);
+check('flat scan → 1 bookmark', flat.bookmarks && flat.bookmarks.length === 1);
+check('flat scan → path []', flat.bookmarks && flat.bookmarks[0] && arrEq(flat.bookmarks[0].path, []));
+check('flat scan → folderCount 0', flat.folderCount === 0);
+check('flat scan → skipped 1', flat.skipped === 1);
+
+const noLinks = parseNetscape('<html><body>no links here</body></html>');
+check('no-links doc → ok:false', noLinks.ok === false);
+
+// ============================ Firefox-style sample ============================
+const firefox = `<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">
+<TITLE>Bookmarks</TITLE>
+<H1>Bookmarks Menu</H1>
+<DL><p>
+    <DT><H3 ADD_DATE="1600000000" LAST_MODIFIED="1600000100" PERSONAL_TOOLBAR_FOLDER="true">Bookmarks Toolbar</H3>
+    <DL><p>
+        <DT><A HREF="https://www.mozilla.org/" ADD_DATE="1600000001" LAST_MODIFIED="1600000200" TAGS="browser,foss">Mozilla</A>
+        <DD>The Mozilla homepage and mission
+        <DT><A HREF="https://support.mozilla.org/" ADD_DATE="1600000002" TAGS="help">Support</A>
+    </DL><p>
+</DL><p>
+`;
+const ff = parseNetscape(firefox);
+check('firefox sample → ok:true', ff.ok === true);
+check('firefox sample → >=1 bookmark', ff.bookmarks && ff.bookmarks.length >= 1);
+
+// ============================ Render summary ============================
+const resultsEl = document.getElementById('results');
+const pre = document.createElement('pre');
+pre.textContent = lines.map((l) => l.status + ' — ' + l.name).join('\n');
+resultsEl.appendChild(pre);
+// Colorize each line for quick scanning.
+resultsEl.innerHTML = '<pre>' + lines.map(
+  (l) => '<span class="' + l.status + '">' + l.status + '</span> — ' +
+    l.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+).join('\n') + '</pre>';
+
+const summary = document.getElementById('summary');
+const finalLine = failures === 0 ? 'ALL PASS' : (failures + ' FAILURES');
+summary.textContent = finalLine;
+summary.className = failures === 0 ? 'ok' : 'bad';
+console.log(finalLine);
+</script>
+</body>
+</html>
