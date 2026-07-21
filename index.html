@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Bookmark Launcher</title>
+  <meta name="description" content="Your Chrome bookmarks as a phone-style app launcher.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+  <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
+  <link rel="icon" href="./icons/icon-192.png" sizes="192x192" type="image/png">
+  <link rel="apple-touch-icon" href="./icons/icon-180.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Bookmarks">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="stylesheet" href="./css/app.css">
+  <script type="module" src="./js/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#grid">Skip to bookmarks</a>
+
+  <header id="app-header" class="header" role="banner">
+    <div class="header__bar">
+      <span class="header__title">Bookmarks</span>
+      <div class="search" role="search">
+        <svg class="search__icon" aria-hidden="true" viewBox="0 0 24 24" width="20" height="20">
+          <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"></circle>
+          <line x1="16.5" y1="16.5" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"></line>
+        </svg>
+        <input id="search-input" class="search__input" type="search" placeholder="Search bookmarks" autocomplete="off" enterkeyhint="search" aria-label="Search bookmarks">
+        <button id="search-clear" class="search__clear icon-btn" hidden aria-label="Clear search" type="button">✕</button>
+      </div>
+      <button id="btn-overflow" class="icon-btn icon-btn--overflow" popovertarget="overflow-menu" aria-label="More" aria-haspopup="menu">⋮</button>
+    </div>
+    <nav class="chips" aria-label="Filter by account">
+      <div id="account-chips" class="chips__scroll" role="tablist" aria-label="Accounts"></div>
+    </nav>
+  </header>
+
+  <main id="main" class="main">
+    <div id="breadcrumb" class="breadcrumb" hidden>
+      <button id="btn-folder-back" class="breadcrumb__back icon-btn" type="button" aria-label="Back">‹</button>
+      <h2 id="folder-title" class="breadcrumb__title"></h2>
+    </div>
+    <section id="launcher" class="launcher" role="tabpanel" aria-label="Bookmarks">
+      <ul id="grid" class="grid" role="list" aria-label="Bookmarks"></ul>
+      <div id="no-results" class="no-results" hidden role="status">
+        No bookmarks match <span id="no-results-term"></span>.
+      </div>
+      <section id="empty-state" class="empty-state" hidden>
+        <svg class="empty-state__icon" aria-hidden="true" viewBox="0 0 96 96" width="96" height="96">
+          <path d="M30 18h36a8 8 0 0 1 8 8v52l-26-19-26 19V26a8 8 0 0 1 8-8Z" fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"></path>
+        </svg>
+        <h2 class="empty-state__title">No bookmarks yet</h2>
+        <p class="empty-state__text">Import a Chrome bookmark export to get started.</p>
+        <button id="empty-import-btn" class="btn btn--primary" type="button">Import bookmarks</button>
+      </section>
+    </section>
+  </main>
+
+  <div id="overflow-menu" class="menu" popover role="menu" aria-label="More actions">
+    <button id="menu-import" class="menu__item" role="menuitem" type="button">Import bookmarks…</button>
+    <button id="menu-add-bookmark" class="menu__item" role="menuitem" type="button">Add bookmark…</button>
+    <button id="menu-toggle-edit" class="menu__item" role="menuitem" type="button" aria-pressed="false">Edit</button>
+    <button id="menu-manage-accounts" class="menu__item" role="menuitem" type="button">Manage accounts…</button>
+    <hr class="menu__sep">
+    <button id="menu-help" class="menu__item" role="menuitem" type="button">Help</button>
+  </div>
+
+  <dialog id="import-sheet" class="sheet" aria-labelledby="import-title">
+    <div class="sheet__grabber"></div>
+    <header class="dialog__header">
+      <h2 id="import-title" class="dialog__title">Import bookmarks</h2>
+      <button id="import-close" class="dialog__close icon-btn" type="button" aria-label="Close">✕</button>
+    </header>
+    <form id="import-form" class="dialog__body" method="dialog">
+      <label id="import-dropzone" class="dropzone" for="import-file-input">
+        <span class="dropzone__text">Choose or drop a Chrome bookmarks .html file</span>
+        <span id="import-file-name" class="dropzone__file" hidden></span>
+        <input id="import-file-input" class="visually-hidden" type="file" accept=".html,.htm,text/html">
+      </label>
+      <div class="field">
+        <label class="field__label" for="import-account-label">Account name</label>
+        <input id="import-account-label" class="field__input" type="text" placeholder="e.g. Personal" required list="import-label-list">
+        <datalist id="import-label-list"></datalist>
+      </div>
+      <p id="import-replace-warn" class="dialog__note" hidden></p>
+      <p id="import-summary" class="dialog__note" hidden></p>
+      <p id="import-error" class="field__error" role="alert" hidden></p>
+      <footer class="dialog__footer">
+        <button id="import-cancel" class="btn btn--ghost" type="button">Cancel</button>
+        <button id="import-confirm" class="btn btn--primary" type="submit" disabled>Import</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="bookmark-modal" class="dialog" aria-labelledby="bookmark-modal-title" data-kind="link">
+    <header class="dialog__header">
+      <h2 id="bookmark-modal-title" class="dialog__title">Add bookmark</h2>
+      <button id="bookmark-close" class="dialog__close icon-btn" type="button" aria-label="Close">✕</button>
+    </header>
+    <form id="bookmark-form" class="dialog__body" method="dialog">
+      <input id="bookmark-id-input" type="hidden">
+      <div class="field">
+        <label class="field__label" for="bookmark-title-input">Title</label>
+        <input id="bookmark-title-input" class="field__input" type="text" required>
+      </div>
+      <div class="field field--url">
+        <label class="field__label" for="bookmark-url-input">URL</label>
+        <input id="bookmark-url-input" class="field__input" type="url" inputmode="url" placeholder="https://">
+      </div>
+      <div class="field">
+        <label class="field__label" for="bookmark-account-select">Account</label>
+        <select id="bookmark-account-select" class="field__input"></select>
+      </div>
+      <div class="field">
+        <label class="field__label" for="bookmark-folder-select">Folder</label>
+        <select id="bookmark-folder-select" class="field__input"></select>
+      </div>
+      <div id="bookmark-newfolder" class="field" hidden>
+        <label class="field__label" for="bookmark-newfolder-input">New folder name</label>
+        <input id="bookmark-newfolder-input" class="field__input" type="text">
+      </div>
+      <p id="bookmark-error" class="field__error" role="alert" hidden></p>
+      <footer class="dialog__footer">
+        <button id="bookmark-cancel" class="btn btn--ghost" type="button">Cancel</button>
+        <button id="bookmark-save" class="btn btn--primary" type="submit">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="action-sheet" class="sheet sheet--actions" aria-labelledby="action-sheet-title">
+    <div class="sheet__grabber"></div>
+    <h2 id="action-sheet-title" class="action-list__heading"></h2>
+    <div class="action-list" role="group" aria-label="Item actions">
+      <button id="action-open" class="action-list__item" type="button">Open in new tab</button>
+      <button id="action-edit" class="action-list__item" type="button">Edit</button>
+      <button id="action-delete" class="action-list__item action-list__item--danger" type="button">Delete</button>
+    </div>
+    <button id="action-cancel" class="btn btn--ghost btn--block" type="button">Cancel</button>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="dialog" aria-labelledby="confirm-title">
+    <header class="dialog__header">
+      <h2 id="confirm-title" class="dialog__title"></h2>
+    </header>
+    <div class="dialog__body">
+      <p id="confirm-message"></p>
+    </div>
+    <footer class="dialog__footer">
+      <button id="confirm-cancel" class="btn btn--ghost" type="button">Cancel</button>
+      <button id="confirm-ok" class="btn btn--danger" type="button">Delete</button>
+    </footer>
+  </dialog>
+
+  <dialog id="manage-accounts" class="screen" aria-labelledby="manage-accounts-title">
+    <header class="dialog__header">
+      <button id="manage-accounts-back" class="dialog__close icon-btn" type="button" aria-label="Back">‹</button>
+      <h2 id="manage-accounts-title" class="dialog__title">Manage accounts</h2>
+    </header>
+    <div class="dialog__body">
+      <ul id="manage-accounts-list" class="account-list" role="list"></ul>
+      <button id="manage-add-account" class="btn btn--ghost btn--block" type="button">Import another account…</button>
+    </div>
+  </dialog>
+
+  <dialog id="help-screen" class="screen" aria-labelledby="help-title">
+    <header class="dialog__header">
+      <button id="help-close" class="dialog__close icon-btn" type="button" aria-label="Back">‹</button>
+      <h2 id="help-title" class="dialog__title">Help</h2>
+    </header>
+    <div class="dialog__body help">
+      <h3>What is this app?</h3>
+      <p>This is a simple home screen for the websites you use most. It takes the bookmarks you already saved in Chrome and lays them out like the app icons on your phone, so your favourite pages are one tap away. Nothing is shared with anyone, and everything stays on this device.</p>
+
+      <h3>Step 1: Export your bookmarks from your computer</h3>
+      <p>Your bookmarks live in Chrome on your computer, so we start there.</p>
+      <ol>
+        <li>Open Chrome on your computer.</li>
+        <li>In the address bar at the top, type <strong>chrome://bookmarks</strong> and press Enter.</li>
+        <li>Near the top right of that page, click the small three-dot menu (⋮).</li>
+        <li>Choose <strong>Export bookmarks</strong>.</li>
+        <li>Chrome saves a single file ending in <strong>.html</strong>. Pick somewhere easy to find, like your Desktop.</li>
+      </ol>
+
+      <h3>Step 2: Get the file onto your phone</h3>
+      <p>Now send that file to the phone you are reading this on. Any way you like works:</p>
+      <ol>
+        <li>Email the file to yourself and open the email on your phone, or</li>
+        <li>Upload it to Google Drive, Dropbox, or iCloud and open it there, or</li>
+        <li>Use AirDrop or a USB cable if that is easier for you.</li>
+      </ol>
+      <p>You just need to be able to reach the file from your phone. You do not have to open it yet.</p>
+
+      <h3>Step 3: Import into this app</h3>
+      <ol>
+        <li>Tap the three-dot menu (⋮) in the top right of this app.</li>
+        <li>Choose <strong>Import bookmarks</strong>.</li>
+        <li>Tap the box that says to choose a file, and pick the <strong>.html</strong> file you moved over.</li>
+        <li>Give this set of bookmarks a name, like <strong>Personal</strong> or <strong>Work</strong>.</li>
+        <li>Tap <strong>Import</strong>. Your bookmarks appear as tiles right away.</li>
+      </ol>
+      <p>You can repeat this any time you want to add another Chrome account or refresh an existing one.</p>
+
+      <h3>Add this app to your home screen</h3>
+      <p>For the real app feeling, add this page to your home screen so it opens full screen with its own icon.</p>
+      <p><strong>On Android (Chrome):</strong> tap the three-dot menu in Chrome, then choose <strong>Add to Home screen</strong> or <strong>Install app</strong>.</p>
+      <p><strong>On iPhone (Safari):</strong> tap the Share button (the square with an arrow going up), scroll down, and choose <strong>Add to Home Screen</strong>.</p>
+
+      <h3>What about my passwords?</h3>
+      <p>This app never sees, asks for, or stores any of your passwords. It only knows the name and web address of each bookmark. When you tap a tile, the page opens in your normal browser, and Chrome fills in your logins exactly the way it always does. Your accounts stay as safe as they were before.</p>
+
+      <h3>Troubleshooting</h3>
+      <p><strong>Some tiles show a letter instead of a logo.</strong> That is completely normal. When a website does not offer a clear icon, we show the first letter of its name on a coloured tile instead. The bookmark still works the same way.</p>
+      <p><strong>My bookmarks disappeared on iPhone.</strong> iPhones sometimes clear stored data for web apps that have not been opened in a while. If that happens, just import your bookmarks file again using the steps above and everything comes back.</p>
+      <p><strong>The file would not import.</strong> Make sure you chose the <strong>.html</strong> file that Chrome exported, not a screenshot or a different document. If in doubt, export a fresh copy from your computer and try again.</p>
+    </div>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" role="region" aria-label="Notifications" aria-live="polite" aria-atomic="false"></div>
+
+  <template id="tpl-tile-link">
+    <li class="grid__item" role="listitem">
+      <a class="tile tile--link" href="#" target="_blank" rel="noopener noreferrer" draggable="false">
+        <span class="tile__icon">
+          <img class="tile__favicon" alt="" loading="lazy" decoding="async">
+          <span class="tile__letter" aria-hidden="true"></span>
+        </span>
+        <span class="tile__label"></span>
+      </a>
+      <button class="tile__more icon-btn" type="button" aria-label="Bookmark options">⋯</button>
+    </li>
+  </template>
+
+  <template id="tpl-tile-folder">
+    <li class="grid__item" role="listitem">
+      <button class="tile tile--folder" type="button">
+        <span class="tile__icon tile__icon--folder">
+          <span class="folder-mini" aria-hidden="true">
+            <img class="folder-mini__cell" alt="">
+            <img class="folder-mini__cell" alt="">
+            <img class="folder-mini__cell" alt="">
+            <img class="folder-mini__cell" alt="">
+          </span>
+        </span>
+        <span class="tile__label"></span>
+      </button>
+      <button class="tile__more icon-btn" type="button" aria-label="Folder options">⋯</button>
+    </li>
+  </template>
+
+  <template id="tpl-chip">
+    <button class="chip" type="button" role="tab" aria-selected="false" aria-controls="grid">
+      <span class="chip__dot" aria-hidden="true"></span>
+      <span class="chip__label"></span>
+    </button>
+  </template>
+
+  <template id="tpl-account-row">
+    <li class="account-row" role="listitem">
+      <span class="account-row__dot" aria-hidden="true"></span>
+      <span class="account-row__name"></span>
+      <span class="account-row__count"></span>
+      <div class="account-row__actions">
+        <button class="account-row__rename btn btn--ghost" type="button">Rename</button>
+        <button class="account-row__reimport btn btn--ghost" type="button">Update</button>
+        <button class="account-row__delete btn btn--danger" type="button">Delete</button>
+      </div>
+    </li>
+  </template>
+
+  <template id="tpl-toast">
+    <div class="toast" role="status">
+      <span class="toast__msg"></span>
+      <button class="toast__action btn btn--ghost" hidden></button>
+    </div>
+  </template>
+</body>
+</html>
