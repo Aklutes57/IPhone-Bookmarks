@@ -828,6 +828,41 @@ select.field__input { padding-right: var(--space-2); }
   gap: var(--space-3);
 }
 
+/* ---------- Bookmark modal: nested-folder create + colour swatches ---------- */
+#bookmark-newfolder {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.swatch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.swatch {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 2px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-sunken);
+  cursor: pointer;
+}
+.swatch--auto {
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+}
+.swatch[aria-checked="true"] {
+  border-color: var(--bg-elevated);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
 /* ---------- Toasts ---------- */
 .toast-region {
   position: fixed;

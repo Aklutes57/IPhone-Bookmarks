@@ -126,9 +126,30 @@
         <label class="field__label" for="bookmark-folder-select">Folder</label>
         <select id="bookmark-folder-select" class="field__input"></select>
       </div>
-      <div id="bookmark-newfolder" class="field" hidden>
-        <label class="field__label" for="bookmark-newfolder-input">New folder name</label>
-        <input id="bookmark-newfolder-input" class="field__input" type="text">
+      <div id="bookmark-newfolder" hidden>
+        <div class="field">
+          <label class="field__label" for="bookmark-newfolder-parent">Inside</label>
+          <select id="bookmark-newfolder-parent" class="field__input"></select>
+        </div>
+        <div class="field">
+          <label class="field__label" for="bookmark-newfolder-input">New folder name</label>
+          <input id="bookmark-newfolder-input" class="field__input" type="text">
+        </div>
+      </div>
+      <div id="bookmark-color-field" class="field" hidden>
+        <span class="field__label">Tile color</span>
+        <div id="bookmark-color-row" class="swatch-row" role="radiogroup" aria-label="Tile color">
+          <button type="button" class="swatch swatch--auto" role="radio" data-hue="" aria-checked="true" aria-label="Automatic color">A</button>
+          <button type="button" class="swatch" role="radio" data-hue="0" aria-checked="false" aria-label="Red"></button>
+          <button type="button" class="swatch" role="radio" data-hue="30" aria-checked="false" aria-label="Orange"></button>
+          <button type="button" class="swatch" role="radio" data-hue="60" aria-checked="false" aria-label="Yellow"></button>
+          <button type="button" class="swatch" role="radio" data-hue="120" aria-checked="false" aria-label="Green"></button>
+          <button type="button" class="swatch" role="radio" data-hue="170" aria-checked="false" aria-label="Teal"></button>
+          <button type="button" class="swatch" role="radio" data-hue="210" aria-checked="false" aria-label="Blue"></button>
+          <button type="button" class="swatch" role="radio" data-hue="260" aria-checked="false" aria-label="Purple"></button>
+          <button type="button" class="swatch" role="radio" data-hue="310" aria-checked="false" aria-label="Pink"></button>
+        </div>
+        <p class="dialog__note">Used when a site has no logo.</p>
       </div>
       <p id="bookmark-error" class="field__error" role="alert" hidden></p>
       <footer class="dialog__footer">
@@ -144,6 +165,7 @@
     <div class="action-list" role="group" aria-label="Item actions">
       <button id="action-open" class="action-list__item" type="button">Open in new tab</button>
       <button id="action-edit" class="action-list__item" type="button">Edit</button>
+      <button id="action-move" class="action-list__item" type="button">Move</button>
       <button id="action-delete" class="action-list__item action-list__item--danger" type="button">Delete</button>
     </div>
     <button id="action-cancel" class="btn btn--ghost btn--block" type="button">Cancel</button>

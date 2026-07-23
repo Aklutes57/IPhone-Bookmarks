@@ -66,8 +66,9 @@ function cacheDom() {
     'import-cancel', 'import-confirm',
     'bookmark-modal', 'bookmark-modal-title', 'bookmark-close', 'bookmark-form', 'bookmark-id-input',
     'bookmark-title-input', 'bookmark-url-input', 'bookmark-account-select', 'bookmark-folder-select',
-    'bookmark-newfolder', 'bookmark-newfolder-input', 'bookmark-error', 'bookmark-cancel', 'bookmark-save',
-    'action-sheet', 'action-sheet-title', 'action-open', 'action-edit', 'action-delete', 'action-cancel',
+    'bookmark-newfolder', 'bookmark-newfolder-parent', 'bookmark-newfolder-input',
+    'bookmark-color-field', 'bookmark-color-row', 'bookmark-error', 'bookmark-cancel', 'bookmark-save',
+    'action-sheet', 'action-sheet-title', 'action-open', 'action-edit', 'action-move', 'action-delete', 'action-cancel',
     'confirm-dialog', 'confirm-title', 'confirm-message', 'confirm-cancel', 'confirm-ok',
     'manage-accounts', 'manage-accounts-back', 'manage-accounts-list', 'manage-add-account',
     'settings-sheet', 'settings-close', 'theme-choice',
@@ -80,6 +81,7 @@ function cacheDom() {
   ];
   for (const id of ids) dom[id] = $(id);
   // Field wrappers for the bookmark modal.
+  dom.titleWrap = dom['bookmark-title-input'].closest('.field');
   dom.urlWrap = dom['bookmark-url-input'].closest('.field');
   dom.accountWrap = dom['bookmark-account-select'].closest('.field');
   dom.folderWrap = dom['bookmark-folder-select'].closest('.field');
@@ -121,6 +123,19 @@ function isPrefix(P, path) {
   if (path.length < P.length) return false;
   for (let i = 0; i < P.length; i++) if (path[i] !== P[i]) return false;
   return true;
+}
+
+function pathsEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+// §8: first https?:// token in a shared "text" param, else ''.
+function firstHttpUrlIn(text) {
+  if (!text) return '';
+  const m = String(text).match(/https?:\/\/\S+/);
+  return m ? m[0] : '';
 }
 
 function domainOf(u) {
@@ -747,7 +762,7 @@ function renderGrid(cells) {
 }
 
 function bookmarkSig(bm) {
-  return `${bm.url}${SEP}${bm.title}${SEP}${bm.domain}${SEP}${bm.icon ? 1 : 0}`;
+  return `${bm.url}${SEP}${bm.title}${SEP}${bm.domain}${SEP}${bm.icon ? 1 : 0}${SEP}${bm.hueOverride ?? ''}`;
 }
 
 function buildBookmarkTile(bm) {
@@ -767,9 +782,11 @@ function populateBookmarkTile(li, bm) {
   const a = li.querySelector('a.tile');
   a.href = bm.url;
   const info = letterInfo(bm.domain || bm.title);
+  // §7: explicit hueOverride wins over the derived hue.
+  const hue = Number.isInteger(bm.hueOverride) ? bm.hueOverride : info.hue;
   const letter = li.querySelector('.tile__letter');
   letter.textContent = info.letter;
-  letter.style.setProperty('--tile-hue', String(info.hue));
+  letter.style.setProperty('--tile-hue', String(hue));
   li.querySelector('.tile__label').textContent = bm.title;
   // Favicon chain reset.
   const img = li.querySelector('.tile__favicon');
@@ -799,8 +816,14 @@ function buildFolderTile(folder) {
   return li;
 }
 
+function previewHue(p) {
+  // Same precedence as bookmark tiles: explicit override, else derived.
+  return Number.isInteger(p.hueOverride) ? p.hueOverride : (djb2((p.domain || p.title || '').toLowerCase()) % 360);
+}
+
 function populateFolderTile(li, folder) {
-  const previewIds = folder.previewBookmarks.map((p) => p.id).join(',');
+  // §7: preview hues join the sig so override edits repaint the mini-grid.
+  const previewIds = folder.previewBookmarks.map((p) => `${p.id}:${previewHue(p)}`).join(',');
   const sig = `${folder.name}${SEP}${folder.count}${SEP}${previewIds}`;
   if (li.dataset.sig === sig) return;
   li.dataset.sig = sig;
@@ -814,8 +837,7 @@ function populateFolderTile(li, folder) {
     const p = folder.previewBookmarks[i];
     if (p) {
       cell.classList.remove('folder-mini__cell--empty');
-      const hue = djb2((p.domain || p.title || '').toLowerCase()) % 360;
-      cell.style.backgroundColor = `hsl(${hue} 55% 46%)`;
+      cell.style.backgroundColor = `hsl(${previewHue(p)} 55% 46%)`;
       cell.src = p.icon || BLANK_IMG;
     } else {
       cell.classList.add('folder-mini__cell--empty');
@@ -1058,6 +1080,7 @@ function openActionSheet(tileEl) {
     dom['action-open'].textContent = (settings.openInChrome && IS_IOS) ? 'Open in Chrome' : 'Open in new tab';
     dom['action-edit'].hidden = false;
     dom['action-edit'].textContent = 'Edit';
+    dom['action-move'].hidden = true;          // §4.2: Move is folder-only
     dom['action-delete'].hidden = false;
     dom['action-delete'].textContent = 'Delete';
   } else {
@@ -1070,6 +1093,7 @@ function openActionSheet(tileEl) {
     const single = state.view.accountFilter !== 'all';
     dom['action-edit'].hidden = !single;
     dom['action-edit'].textContent = 'Edit';
+    dom['action-move'].hidden = !single;       // §4.2: single-account folders only
     dom['action-delete'].hidden = !single;
     dom['action-delete'].textContent = 'Delete';
   }
@@ -1105,6 +1129,13 @@ function onActionEdit() {
     const acc = state.accounts.get(state.view.accountFilter);
     openBookmarkModal({ kind: 'folder', path: actionCtx.path, name: actionCtx.name, account: acc });
   }
+}
+
+function onActionMove() {
+  if (!actionCtx || actionCtx.kind !== 'folder') return;
+  const acc = state.accounts.get(state.view.accountFilter);
+  if (!acc) return;
+  openBookmarkModal({ kind: 'folder-move', path: actionCtx.path, name: actionCtx.name, account: acc });
 }
 
 async function onActionDelete() {
@@ -1321,18 +1352,28 @@ function openBookmarkModal(opts) {
   dom['bookmark-newfolder'].hidden = true;
   dom['bookmark-newfolder-input'].value = '';
   dom['bookmark-form'].noValidate = true;
+  // Defaults: title shown, colour hidden. Overridden per-kind below.
+  dom.titleWrap.hidden = false;
+  dom['bookmark-color-field'].hidden = true;
 
   if (kind === 'link-add' || kind === 'link-edit') {
     dom['bookmark-modal-title'].textContent = kind === 'link-add' ? 'Add bookmark' : 'Edit bookmark';
     dom.urlWrap.hidden = false;
     dom.accountWrap.hidden = false;
     dom.folderWrap.hidden = false;
+    dom['bookmark-color-field'].hidden = false;
     const bm = opts.bookmark || null;
     populateAccountSelect(bm ? bm.accountId : null);
     populateFolderSelect(dom['bookmark-account-select'].value, bm ? bm.path : (opts.folderPath || []));
+    populateNewFolderParent(dom['bookmark-account-select'].value);
     dom['bookmark-id-input'].value = bm ? bm.id : '';
-    dom['bookmark-title-input'].value = bm ? bm.title : '';
-    dom['bookmark-url-input'].value = bm ? bm.url : '';
+    // §8: prefill from a share-target launch when adding.
+    dom['bookmark-title-input'].value = bm ? bm.title : (opts.prefillTitle || '');
+    dom['bookmark-url-input'].value = bm ? bm.url : (opts.prefillUrl || '');
+    // §7: paint swatches; select the stored override, else Auto.
+    const selHue = (bm && Number.isInteger(bm.hueOverride)) ? bm.hueOverride : null;
+    const autoHue = derivedTileHue(dom['bookmark-title-input'].value, dom['bookmark-url-input'].value);
+    syncColorSwatches(selHue, autoHue);
   } else if (kind === 'folder') {
     dom['bookmark-modal-title'].textContent = 'Rename folder';
     dom.urlWrap.hidden = true;
@@ -1340,6 +1381,17 @@ function openBookmarkModal(opts) {
     dom.folderWrap.hidden = true;
     dom['bookmark-id-input'].value = '';
     dom['bookmark-title-input'].value = opts.name || (opts.path ? opts.path[opts.path.length - 1] : '');
+  } else if (kind === 'folder-move') {
+    // §4.2: only the destination folder select is shown.
+    dom['bookmark-modal-title'].textContent = 'Move folder';
+    dom.titleWrap.hidden = true;
+    dom.urlWrap.hidden = true;
+    dom.accountWrap.hidden = true;
+    dom.folderWrap.hidden = false;
+    dom['bookmark-id-input'].value = '';
+    const P = opts.path;
+    populateFolderSelect(opts.account.id, P.slice(0, -1), P);
+    populateNewFolderParent(opts.account.id, P);
   } else if (kind === 'account') {
     dom['bookmark-modal-title'].textContent = 'Rename account';
     dom.urlWrap.hidden = true;
@@ -1349,6 +1401,11 @@ function openBookmarkModal(opts) {
     dom['bookmark-title-input'].value = opts.account.label;
   }
   openSheet('bookmark-modal');
+
+  // §8: text without a URL lands the caret on the empty URL field.
+  if (kind === 'link-add' && ('prefillUrl' in opts || 'prefillTitle' in opts) && !dom['bookmark-url-input'].value) {
+    try { dom['bookmark-url-input'].focus(); } catch { /* ignore */ }
+  }
 }
 
 function populateAccountSelect(selectedId) {
@@ -1377,14 +1434,16 @@ function populateAccountSelect(selectedId) {
   }
 }
 
-function populateFolderSelect(accountId, selectedPath) {
+function populateFolderSelect(accountId, selectedPath, excludePrefix) {
   const frag = document.createDocumentFragment();
   const top = document.createElement('option');
   top.value = '';
   top.textContent = 'Top';
   frag.appendChild(top);
   const realId = accountId === '__manual__' ? null : accountId;
-  const paths = realId ? folderPathsOf(realId) : [];
+  const all = realId ? folderPathsOf(realId) : [];
+  // §4.2: exclude the moved folder + descendants from move destinations.
+  const paths = excludePrefix ? all.filter((p) => !isPrefix(excludePrefix, p)) : all;
   for (const p of paths) {
     const o = document.createElement('option');
     o.value = JSON.stringify(p);
@@ -1408,6 +1467,75 @@ function populateFolderSelect(accountId, selectedPath) {
   dom['bookmark-newfolder'].hidden = sel.value !== '__new__';
 }
 
+// §4.1: fill the "Inside" parent picker for New-folder creation. `excludePrefix`
+// (folder-move only) drops the moved folder and its descendants. Defaults the
+// selection to the current view folder when it belongs to the chosen account.
+function populateNewFolderParent(accountId, excludePrefix) {
+  const sel = dom['bookmark-newfolder-parent'];
+  const realId = accountId === '__manual__' ? null : accountId;
+  const all = realId ? folderPathsOf(realId) : [];
+  const paths = excludePrefix ? all.filter((p) => !isPrefix(excludePrefix, p)) : all;
+  const frag = document.createDocumentFragment();
+  const top = document.createElement('option');
+  top.value = '';
+  top.textContent = 'Top';
+  frag.appendChild(top);
+  const keys = new Set();
+  for (const p of paths) {
+    const key = JSON.stringify(p);
+    keys.add(key);
+    const o = document.createElement('option');
+    o.value = key;
+    o.textContent = p.join(' / ');
+    frag.appendChild(o);
+  }
+  sel.replaceChildren(frag);
+  const vfp = state.view.folderPath;
+  const wantKey = (vfp && vfp.length) ? JSON.stringify(vfp) : '';
+  sel.value = (wantKey && keys.has(wantKey)) ? wantKey : '';
+}
+
+/* §7: tile-colour swatches (Auto + 8 fixed hues). */
+function derivedTileHue(title, urlRaw) {
+  let domain = '';
+  const raw = (urlRaw || '').trim();
+  if (raw) {
+    const v = validateUrl(raw);
+    if (v.url) domain = domainOf(v.url);
+  }
+  return letterInfo(domain || title || '').hue;
+}
+
+// Paint every swatch (Auto shows the derived hue) and mark the selection.
+// selectedHue is null for Auto, else one of the fixed hues.
+function syncColorSwatches(selectedHue, autoHue) {
+  const swatches = dom['bookmark-color-row'].querySelectorAll('.swatch');
+  for (const sw of swatches) {
+    const isAuto = sw.dataset.hue === '';
+    const h = isAuto ? autoHue : parseInt(sw.dataset.hue, 10);
+    sw.style.background = `hsl(${h} 55% 46%)`;
+    const swHue = isAuto ? null : h;
+    sw.setAttribute('aria-checked', swHue === selectedHue ? 'true' : 'false');
+  }
+}
+
+// Live-update only the Auto swatch as the title/URL fields change.
+function updateAutoSwatch() {
+  if (dom['bookmark-color-field'].hidden) return;
+  const auto = dom['bookmark-color-row'].querySelector('.swatch[data-hue=""]');
+  if (!auto) return;
+  const h = derivedTileHue(dom['bookmark-title-input'].value, dom['bookmark-url-input'].value);
+  auto.style.background = `hsl(${h} 55% 46%)`;
+}
+
+// Read the chosen hue: null (Auto) or the checked fixed hue.
+function selectedColorHue() {
+  const checked = dom['bookmark-color-row'].querySelector('.swatch[aria-checked="true"]');
+  if (!checked || checked.dataset.hue === '') return null;
+  const h = parseInt(checked.dataset.hue, 10);
+  return Number.isInteger(h) ? h : null;
+}
+
 function showBookmarkError(msg) {
   dom['bookmark-error'].hidden = false;
   dom['bookmark-error'].textContent = msg;
@@ -1429,7 +1557,11 @@ function resolveFolderPathFromSelect() {
   if (val === '__new__') {
     const seg = normSeg(dom['bookmark-newfolder-input'].value);
     if (!seg) return { error: 'Please enter a folder name.' };
-    return { path: [seg] };
+    // §4.1: nest the new folder under the chosen "Inside" parent.
+    let parentPath = [];
+    const pv = dom['bookmark-newfolder-parent'].value;
+    if (pv) { try { parentPath = JSON.parse(pv); } catch { parentPath = []; } }
+    return { path: parentPath.concat([seg]) };
   }
   if (val === '') return { path: [] };
   try { return { path: JSON.parse(val) }; }
@@ -1461,6 +1593,7 @@ async function onBookmarkSave() {
   if (kind === 'link-add') return saveLinkAdd();
   if (kind === 'link-edit') return saveLinkEdit();
   if (kind === 'folder') return saveFolderRename();
+  if (kind === 'folder-move') return saveFolderMove();
   if (kind === 'account') return saveAccountRename();
 }
 
@@ -1478,6 +1611,9 @@ async function saveLinkAdd() {
     id: uuid(), accountId, title, url: u.href, domain, path: pathRes.path,
     icon: null, addDate: nowSec(), order: nextOrder(accountId),
   };
+  // §7: attach an explicit tile hue when one is chosen (Auto omits the field).
+  const hue = selectedColorHue();
+  if (hue !== null) record.hueOverride = hue;
   try { await storage.putBookmark(record); }
   catch { showBookmarkError("Couldn't save. Please try again."); return; }
   upsertBookmarkInState(record);
@@ -1506,6 +1642,10 @@ async function saveLinkEdit() {
   updated.domain = domainOf(u);
   updated.title = dom['bookmark-title-input'].value.trim() || updated.domain;
   updated.path = pathRes.path;
+  // §7: write the chosen hue, or strip any existing override for Auto.
+  const hue = selectedColorHue();
+  if (hue !== null) updated.hueOverride = hue;
+  else delete updated.hueOverride;
   if (accountId !== orig.accountId) {
     updated.accountId = accountId;
     updated.order = nextOrder(accountId);
@@ -1540,6 +1680,51 @@ async function saveFolderRename() {
   closeSheet();
   render();
   toast('Folder renamed.');
+}
+
+async function saveFolderMove() {
+  const P = bookmarkCtx.path;
+  const acc = bookmarkCtx.account || state.accounts.get(state.view.accountFilter);
+  if (!acc || !P || !P.length) { showBookmarkError('Something went wrong.'); return; }
+  const destRes = resolveFolderPathFromSelect();
+  if (destRes.error) { showBookmarkError(destRes.error); return; }
+  const D = destRes.path;                  // destination parent path
+  const name = P[P.length - 1];
+  const newPrefix = D.concat([name]);
+  // No move: destination parent is the current parent.
+  if (pathsEqual(newPrefix, P)) { closeSheet(); return; }
+
+  const accBms = state.byAccount.get(acc.id) || [];
+  // Collision: a folder already lives at newPrefix (outside the moved subtree).
+  const collision = accBms.some((b) => !isPrefix(P, b.path) && isPrefix(newPrefix, b.path));
+  if (collision) {
+    const ok = await confirmDialog({
+      title: 'Combine folders',
+      message: `A folder named '${name}' is already there. The two folders will be combined.`,
+      confirmLabel: 'Combine',
+    });
+    if (!ok) return;
+  }
+
+  // Exact prefix rewrite for the moved folder and every descendant.
+  const updatedAll = accBms.map((b) => (
+    isPrefix(P, b.path) ? { ...b, path: newPrefix.concat(b.path.slice(P.length)) } : b
+  ));
+  const updatedAcc = { ...acc, updatedAt: nowSec() };
+  try { await storage.replaceAccountBookmarks(updatedAcc, updatedAll); }
+  catch {
+    if (state.ui.sheet === 'bookmark-modal') showBookmarkError("Couldn't save. Please try again.");
+    else toast("Couldn't save. Please try again.");
+    return;
+  }
+  state.accounts.set(acc.id, updatedAcc);
+  replaceAccountBookmarksInState(acc.id, updatedAll);
+  if (isPrefix(P, state.view.folderPath)) {
+    state.view.folderPath = newPrefix.concat(state.view.folderPath.slice(P.length));
+  }
+  closeSheet();
+  render();
+  toast('Folder moved.');
 }
 
 async function saveAccountRename() {
@@ -1736,15 +1921,28 @@ function wireEvents() {
   dom['bookmark-cancel'].addEventListener('click', () => closeSheet());
   dom['bookmark-form'].addEventListener('submit', (e) => { e.preventDefault(); onBookmarkSave(); });
   dom['bookmark-account-select'].addEventListener('change', () => {
-    populateFolderSelect(dom['bookmark-account-select'].value, []);
+    const accId = dom['bookmark-account-select'].value;
+    populateFolderSelect(accId, []);
+    populateNewFolderParent(accId);
   });
   dom['bookmark-folder-select'].addEventListener('change', () => {
     dom['bookmark-newfolder'].hidden = dom['bookmark-folder-select'].value !== '__new__';
+  });
+  // §7: keep the Auto swatch showing the live derived hue; pick a fixed hue.
+  dom['bookmark-title-input'].addEventListener('input', updateAutoSwatch);
+  dom['bookmark-url-input'].addEventListener('input', updateAutoSwatch);
+  dom['bookmark-color-row'].addEventListener('click', (e) => {
+    const sw = e.target.closest('.swatch');
+    if (!sw) return;
+    for (const s of dom['bookmark-color-row'].querySelectorAll('.swatch')) {
+      s.setAttribute('aria-checked', s === sw ? 'true' : 'false');
+    }
   });
 
   // Action sheet.
   dom['action-open'].addEventListener('click', onActionOpen);
   dom['action-edit'].addEventListener('click', onActionEdit);
+  dom['action-move'].addEventListener('click', onActionMove);
   dom['action-delete'].addEventListener('click', onActionDelete);
   dom['action-cancel'].addEventListener('click', () => closeSheet());
 
@@ -1860,8 +2058,26 @@ async function boot() {
     state.view.accountFilter = 'all';
   }
 
+  // §8: parse a share-target launch BEFORE initHistory stamps its base entry,
+  // so the shared params never resurface via back/forward.
+  let sharePrefill = null;
+  const sp = new URLSearchParams(location.search);
+  const spUrl = sp.get('url');
+  const spText = sp.get('text');
+  const spTitle = sp.get('title');
+  if (spUrl !== null || spText !== null || spTitle !== null) {
+    sharePrefill = {
+      prefillTitle: spTitle || '',
+      prefillUrl: spUrl || firstHttpUrlIn(spText),
+    };
+    history.replaceState(null, '', location.pathname);
+  }
+
   initHistory();
   render();
+  if (sharePrefill) {
+    openBookmarkModal({ kind: 'link-add', prefillTitle: sharePrefill.prefillTitle, prefillUrl: sharePrefill.prefillUrl });
+  }
   registerServiceWorker();
   state.ready = true;
 }
