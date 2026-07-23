@@ -60,6 +60,13 @@ Phones don't let apps read Chrome's saved passwords, and that's a good thing. If
 - **On iPhone:** if your bookmarks ever seem to vanish, import the file again. It also helps to use the version you added to your Home Screen rather than a fresh Safari tab.
 - **Updates are automatic.** When a new version is ready, you'll see a small "tap to reload" message. Tap it and you're up to date.
 
+## How this app was made
+
+This whole app was vibecoded — I described what I wanted in plain English and
+Claude (an AI) designed, wrote, and tested all of the code. I don't have much
+experience with code myself, so if you're reading this repo: the code is the
+AI's work, reviewed and steered by me through conversation.
+
 ## For developers
 
 This is a vanilla progressive web app. No frameworks, no build step, no dependencies.
