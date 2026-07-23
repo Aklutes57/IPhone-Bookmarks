@@ -45,6 +45,11 @@ let toastTimer = null;
 const BLANK_IMG = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
 const SEP = '␟';
 
+// Cached once at boot. iPadOS Safari reports a Mac UA, so treat a "Mac" UA with
+// multi-touch as iOS too. Gates the Open-in-Chrome feature (§1).
+const IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent)
+  || (navigator.userAgent.includes('Mac') && navigator.maxTouchPoints > 1);
+
 /* ============================ DOM cache ============================ */
 
 const dom = {};
@@ -234,8 +239,281 @@ function renderBackupStatus() {
 
 function openSettingsSheet() {
   syncThemeChoice();
+  syncChromeToggle();
   renderBackupStatus();
+  hideRestoreError();
   openSheet('settings-sheet');
+}
+
+/* ============================ Open in Chrome (§1) ============================ */
+
+// Convert an http/https URL into the Chrome custom-scheme equivalent. Path,
+// query and fragment ride along via the slice+concat. Returns null for
+// anything that is not http/https.
+function chromeSchemeUrl(url) {
+  if (url.startsWith('https://')) return 'googlechromes://' + url.slice(8);
+  if (url.startsWith('http://')) return 'googlechrome://' + url.slice(7);
+  return null;
+}
+
+let chromeFallbackTimer = null;
+let chromeFallbackVisHandler = null;
+
+function cancelChromeFallback() {
+  if (chromeFallbackTimer) { clearTimeout(chromeFallbackTimer); chromeFallbackTimer = null; }
+  if (chromeFallbackVisHandler) {
+    document.removeEventListener('visibilitychange', chromeFallbackVisHandler);
+    chromeFallbackVisHandler = null;
+  }
+}
+
+// After navigating to the Chrome scheme, wait ~1.6s. If the app never went to
+// the background (Chrome opening fires visibilitychange, which cancels us),
+// Chrome is presumably not installed: surface a sticky toast to open here.
+// Listener is removed on both the fired and the cancelled path.
+function armChromeFallback(url) {
+  cancelChromeFallback();
+  chromeFallbackVisHandler = () => { if (document.visibilityState === 'hidden') cancelChromeFallback(); };
+  document.addEventListener('visibilitychange', chromeFallbackVisHandler);
+  chromeFallbackTimer = setTimeout(() => {
+    document.removeEventListener('visibilitychange', chromeFallbackVisHandler);
+    chromeFallbackVisHandler = null;
+    chromeFallbackTimer = null;
+    toast("Couldn't open Chrome. Is it installed?", {
+      duration: 0,
+      actionLabel: 'Open here',
+      action: () => window.open(url, '_blank', 'noopener'),
+    });
+  }, 1600);
+}
+
+// Route a URL through the Chrome app via its custom scheme, arming the
+// not-installed fallback. location.href is the primitive (works from a
+// standalone PWA where window.open is unreliable). Anchor hrefs are never
+// touched. Returns false without acting when the URL has no http/https scheme.
+function openViaChromeScheme(url) {
+  const scheme = chromeSchemeUrl(url);
+  if (!scheme) return false;
+  armChromeFallback(url);
+  location.href = scheme;
+  return true;
+}
+
+function syncChromeToggle() {
+  dom['settings-chrome-toggle'].checked = settings.openInChrome;
+  dom['settings-chrome-note'].hidden = !settings.openInChrome;
+}
+
+/* ============================ Backup & restore (§2) ============================ */
+
+// Assemble the backup JSON from current in-memory state + settings. Usage
+// records are passed in (fetched from storage by the caller before any share
+// gesture is spent). Accounts and bookmarks are copied verbatim.
+function buildBackupPayload(usageRecords) {
+  return {
+    app: 'bookmark-launcher',
+    formatVersion: 1,
+    exportedAt: nowSec(),
+    accounts: [...state.accounts.values()].map((a) => ({ ...a })),
+    bookmarks: state.bookmarks.map((b) => ({ ...b })),
+    usage: (usageRecords || []).map((u) => ({ key: u.key, count: u.count, lastAt: u.lastAt })),
+    settings: {
+      theme: settings.theme,
+      openInChrome: settings.openInChrome,
+      lastAccount: settings.lastAccount,
+      helpSeen: settings.helpSeen,
+    },
+  };
+}
+
+function anchorDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+function completeBackup() {
+  saveSettings({ lastBackupAt: nowSec() });
+  renderBackupStatus();
+}
+
+async function onBackupSave() {
+  let usageRecords = [];
+  try { usageRecords = await storage.getAllUsage(); } catch { usageRecords = []; }
+  const payload = buildBackupPayload(usageRecords);
+  const json = JSON.stringify(payload, null, 2);
+  const filename = `bookmark-launcher-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  const blob = new Blob([json], { type: 'application/json' });
+
+  if (IS_IOS && typeof navigator.canShare === 'function') {
+    const file = new File([blob], filename, { type: 'application/json' });
+    if (navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file] });
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;   // user cancelled: no timestamp
+        anchorDownload(blob, filename);                 // other share error: fall back
+      }
+      completeBackup();
+      return;
+    }
+  }
+  anchorDownload(blob, filename);
+  completeBackup();
+}
+
+function showRestoreError() {
+  dom['settings-restore-error'].hidden = false;
+  dom['settings-restore-error'].textContent = "That doesn't look like a Bookmark Launcher backup file.";
+}
+
+function hideRestoreError() {
+  dom['settings-restore-error'].hidden = true;
+  dom['settings-restore-error'].textContent = '';
+}
+
+// Validate + sanitize a parsed backup object per §2. Returns null on a
+// structural failure (surfaced as the single friendly error); otherwise returns
+// cleaned { accounts, bookmarks, usage } ready for storage.replaceAll.
+// Record-level problems drop/coerce the offending record, never the whole file.
+function validateBackup(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  if (data.formatVersion !== 1) return null;
+  if (!Array.isArray(data.accounts) || !Array.isArray(data.bookmarks)) return null;
+
+  const now = nowSec();
+
+  const accountsById = new Map(); // dup ids: keep first
+  for (const raw of data.accounts) {
+    if (!raw || typeof raw !== 'object') continue;
+    if (typeof raw.id !== 'string' || raw.id === '') continue;
+    if (typeof raw.label !== 'string' || raw.label === '') continue;
+    if (raw.kind !== 'import' && raw.kind !== 'manual') continue;
+    if (accountsById.has(raw.id)) continue;
+    const acc = {
+      id: raw.id,
+      label: raw.label,
+      kind: raw.kind,
+      createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : now,
+      updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : now,
+    };
+    if (typeof raw.fileName === 'string') acc.fileName = raw.fileName;
+    accountsById.set(acc.id, acc);
+  }
+
+  const bookmarksById = new Map(); // dup ids: keep first
+  data.bookmarks.forEach((raw, index) => {
+    if (!raw || typeof raw !== 'object') return;
+    if (typeof raw.id !== 'string' || raw.id === '') return;
+    if (bookmarksById.has(raw.id)) return;
+    if (typeof raw.accountId !== 'string' || !accountsById.has(raw.accountId)) return;
+    if (typeof raw.url !== 'string') return;
+    let u;
+    try { u = new URL(raw.url); } catch { return; }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
+    const domain = domainOf(u);
+    const path = Array.isArray(raw.path)
+      ? raw.path.filter((seg) => typeof seg === 'string' && seg !== '')
+      : [];
+    const bm = {
+      id: raw.id,
+      accountId: raw.accountId,
+      title: (typeof raw.title === 'string' && raw.title.trim() !== '') ? raw.title : domain,
+      url: u.href,
+      domain,
+      path,
+      icon: (typeof raw.icon === 'string' && raw.icon.startsWith('data:image/')) ? raw.icon : null,
+      addDate: typeof raw.addDate === 'number' ? raw.addDate : null,
+      order: typeof raw.order === 'number' ? raw.order : index,
+    };
+    if (Number.isInteger(raw.hueOverride) && raw.hueOverride >= 0 && raw.hueOverride <= 359) {
+      bm.hueOverride = raw.hueOverride;
+    }
+    bookmarksById.set(bm.id, bm);
+  });
+
+  const usage = [];
+  if (Array.isArray(data.usage)) {
+    for (const raw of data.usage) {
+      if (!raw || typeof raw !== 'object') continue;
+      if (typeof raw.key !== 'string' || raw.key === '') continue;
+      if (!Number.isInteger(raw.count) || raw.count <= 0) continue;
+      if (typeof raw.lastAt !== 'number') continue;
+      usage.push({ key: raw.key, count: raw.count, lastAt: raw.lastAt });
+    }
+  }
+
+  return { accounts: [...accountsById.values()], bookmarks: [...bookmarksById.values()], usage };
+}
+
+async function onRestoreFile(file) {
+  hideRestoreError();
+  let data;
+  try {
+    const text = await file.text();
+    data = JSON.parse(text);
+  } catch {
+    showRestoreError();
+    return;
+  }
+  const clean = validateBackup(data);
+  if (!clean) { showRestoreError(); return; }
+
+  const when = (typeof data.exportedAt === 'number') ? data.exportedAt : nowSec();
+  const dateStr = new Date(when * 1000).toLocaleDateString();
+  const nAcc = clean.accounts.length;
+  const mBm = clean.bookmarks.length;
+  const ok = await confirmDialog({
+    title: 'Restore backup',
+    message: `Replace everything on this phone with this backup from ${dateStr}? (${countLabel(nAcc, 'account')}, ${countLabel(mBm, 'bookmark')}.) This can't be undone.`,
+    confirmLabel: 'Replace',
+  });
+  if (!ok) return;
+
+  try {
+    await storage.replaceAll(clean.accounts, clean.bookmarks, clean.usage);
+  } catch {
+    // Atomic: nothing committed, in-memory state untouched.
+    toast("Couldn't restore. Nothing was changed.");
+    return;
+  }
+
+  // Rebuild in-memory state from the restored data.
+  state.accounts = new Map(clean.accounts.map((a) => [a.id, a]));
+  state.bookmarks = clean.bookmarks;
+  rebuildIndexes();
+  if (state.usage instanceof Map) {
+    state.usage = new Map(clean.usage.map((u) => [u.key, { count: u.count, lastAt: u.lastAt }]));
+  }
+
+  // Apply settings from the backup; keep device-local helpSeen + lastBackupAt.
+  const bk = (data.settings && typeof data.settings === 'object') ? data.settings : {};
+  const theme = (bk.theme === 'light' || bk.theme === 'dark') ? bk.theme : 'system';
+  const openInChrome = bk.openInChrome === true;
+  let lastAccount = bk.lastAccount;
+  if (typeof lastAccount !== 'string' || (lastAccount !== 'all' && !state.accounts.has(lastAccount))) {
+    lastAccount = 'all';
+  }
+  saveSettings({ theme, openInChrome, lastAccount });
+  applyTheme();
+  syncThemeChoice();
+  syncChromeToggle();
+
+  // Reset the view to the home root.
+  state.view.screen = 'home';
+  state.view.accountFilter = lastAccount;
+  state.view.folderPath = [];
+  state.view.query = '';
+  state.view.editMode = false;
+  state.firstRun = state.accounts.size === 0;
+  syncNav();
+  render();
+  toast(`Backup restored — ${countLabel(mBm, 'bookmark')}.`);
 }
 
 /* ============================ Indexes ============================ */
@@ -724,6 +1002,14 @@ function onGridClick(e) {
   if (state.view.editMode) {
     e.preventDefault();
     openActionSheet(li);
+    return;
+  }
+  // Not editing: honor Open-in-Chrome (§1). Never mutates the anchor href, so
+  // long-press / copy / open-in-new-tab keep working on the untouched link.
+  const bm = state.byId.get(li.dataset.id);
+  if (bm && settings.openInChrome && IS_IOS) {
+    /* recordTap(bm) — usage recording lands in M4 (§6) */
+    if (openViaChromeScheme(bm.url)) { e.preventDefault(); return; }
   }
   // else: allow native anchor navigation (target=_blank)
 }
@@ -769,7 +1055,7 @@ function openActionSheet(tileEl) {
     actionCtx = { kind: 'link', bookmark: bm };
     dom['action-sheet-title'].textContent = bm.title;
     dom['action-open'].hidden = false;
-    dom['action-open'].textContent = 'Open in new tab';
+    dom['action-open'].textContent = (settings.openInChrome && IS_IOS) ? 'Open in Chrome' : 'Open in new tab';
     dom['action-edit'].hidden = false;
     dom['action-edit'].textContent = 'Edit';
     dom['action-delete'].hidden = false;
@@ -793,7 +1079,12 @@ function openActionSheet(tileEl) {
 function onActionOpen() {
   if (!actionCtx) return;
   if (actionCtx.kind === 'link') {
-    window.open(actionCtx.bookmark.url, '_blank', 'noopener');
+    /* recordTap(actionCtx.bookmark) — usage recording lands in M4 (§6) */
+    if (settings.openInChrome && IS_IOS) {
+      openViaChromeScheme(actionCtx.bookmark.url);
+    } else {
+      window.open(actionCtx.bookmark.url, '_blank', 'noopener');
+    }
     closeSheet();
   } else {
     // Close sheet and descend in-place (replace the sheet's history entry).
@@ -1489,6 +1780,30 @@ function wireEvents() {
     syncThemeChoice();
   });
 
+  // Open-in-Chrome toggle + test (§1).
+  dom['settings-chrome-toggle'].addEventListener('change', () => {
+    const on = dom['settings-chrome-toggle'].checked;
+    saveSettings({ openInChrome: on });
+    dom['settings-chrome-note'].hidden = !on;
+  });
+  dom['settings-chrome-test'].addEventListener('click', () => {
+    openViaChromeScheme('https://www.google.com/');
+  });
+
+  // Backup & restore (§2).
+  dom['settings-backup-btn'].addEventListener('click', () => { onBackupSave(); });
+  dom['settings-restore-btn'].addEventListener('click', () => {
+    hideRestoreError();
+    dom['settings-restore-input'].click();
+  });
+  dom['settings-restore-input'].addEventListener('change', () => {
+    const input = dom['settings-restore-input'];
+    const f = input.files && input.files[0];
+    if (!f) return;
+    // Clear the picker after handling so re-picking the same file refires.
+    onRestoreFile(f).finally(() => { input.value = ''; });
+  });
+
   // Esc/cancel on every dialog routes through history so DOM + state stay in sync.
   for (const id of ['import-sheet', 'bookmark-modal', 'action-sheet', 'confirm-dialog', 'manage-accounts', 'settings-sheet', 'help-screen']) {
     dom[id].addEventListener('cancel', (e) => { e.preventDefault(); closeSheet(); });
@@ -1516,6 +1831,10 @@ async function boot() {
   loadSettings();
   applyTheme();
   wireEvents();
+
+  // Reveal the Open-in-Chrome control only on iOS (§1). Non-iOS keeps it hidden
+  // AND the interception guards on IS_IOS, so a restored openInChrome is inert.
+  if (IS_IOS) dom['settings-chrome-row'].hidden = false;
 
   storage.setVersionChangeHandler(() => {
     toast('Updated in another tab — tap to reload', { duration: 0, action: () => location.reload() });
