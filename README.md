@@ -1,6 +1,6 @@
 # Bookmark Launcher
 
-### Open the app here: **https://aklutes57.github.io/App-Creation-/**
+### Open the app here: **https://aklutes57.github.io/IPhone-Bookmarks/**
 
 Tap that link on your phone, add it to your Home Screen once, and the app lives right on your Home Screen.
 
@@ -30,7 +30,7 @@ Why this is safe: the app keeps everything on your phone and never uploads anyth
 
 ## 4. Import your bookmarks into the app
 
-1. Open the app URL in Chrome on your phone: **https://aklutes57.github.io/App-Creation-/**
+1. Open the app URL in Chrome on your phone: **https://aklutes57.github.io/IPhone-Bookmarks/**
 2. Open the menu and choose **Import bookmarks**.
 3. Pick the file you moved onto your phone.
 4. Give this set a short name, like `Personal` or `Work`.
@@ -74,4 +74,4 @@ A plain server is required because the service worker won't run from `file://`.
 
 Deployment is handled by GitHub Actions (`.github/workflows/deploy.yml`), which publishes to GitHub Pages at the canonical URL on every push to `main`:
 
-**https://aklutes57.github.io/App-Creation-/**
+**https://aklutes57.github.io/IPhone-Bookmarks/**
