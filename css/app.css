@@ -439,6 +439,29 @@ img { max-width: 100%; }
 .launcher.is-editing .grid__item:nth-child(2n) .tile { animation-delay: .08s; }
 .launcher.is-editing .grid__item:nth-child(3n) .tile { animation-delay: .16s; }
 
+/* ---------- Drag-to-rearrange (§5) ---------- */
+/* Edit mode surrenders vertical swipe-scroll ON a link tile so the drag gesture
+   owns the pointer; scroll instead via folder tiles, gaps, or autoscroll. */
+.launcher.is-editing .grid__item[data-kind="link"] { touch-action: none; }
+
+/* The source tile becomes a faint, still placeholder while its ghost is dragged. */
+.grid__item--drag-source .tile { opacity: .35; animation: none; }
+
+/* The floating clone that rides the finger. Transform (translate3d + scale) is
+   set inline by JS; it sits just above toasts and never intercepts hit-tests. */
+#drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  margin: 0;
+  pointer-events: none;
+  z-index: calc(var(--z-toast) + 1);
+  box-shadow: var(--shadow-2);
+  border-radius: var(--radius-lg);
+  will-change: transform;
+}
+#drag-ghost .tile { animation: none; width: 100%; }
+
 /* ---------- Frequently used row (§6) ---------- */
 .frequent {
   --tile-icon: 52px;

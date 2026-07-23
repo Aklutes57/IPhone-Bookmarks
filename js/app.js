@@ -36,6 +36,15 @@ let pendingConfirm = null;    // { resolve } for the active confirmDialog
 // Long-press tracking.
 let lpTimer = null, lpStart = null, lpFired = false, lpTile = null;
 
+// §5: drag-to-rearrange. dragPending holds the armed-but-not-yet-dragging state
+// (150ms hold or >8px move promotes it); dragSession is the live drag; dragDirty
+// records that a render() was suppressed mid-drag; suppressNextClick swallows the
+// synthetic click a mouse/touch drag emits on release (mirrors the lpFired swallow).
+let dragPending = null;   // { pointerId, li, bm, x0, y0, timer }
+let dragSession = null;   // { pointerId, li, bm, ghost, grabDx, grabDy, lastX, lastY, headerEl, raf }
+let dragDirty = false;
+let suppressNextClick = false;
+
 // Service worker.
 let swReg = null, lastUpdateCheck = 0, reloadedForUpdate = false;
 
@@ -715,6 +724,9 @@ function scheduleRender() {
 }
 
 function render() {
+  // §5: while a drag is live the DOM is authoritative (source li relocated in
+  // place); suppress rebuilds so replaceChildren can't yank the captured node.
+  if (dragSession) { dragDirty = true; return; }
   const body = document.body;
   body.dataset.screen = state.view.screen;
   body.dataset.edit = state.view.editMode ? 'on' : 'off';
@@ -961,6 +973,9 @@ function initHistory() {
 }
 
 function onPopState(e) {
+  // §5: abort any in-flight drag BEFORE applying the popped view (the drag never
+  // pushed history, so a back gesture must cancel it cleanly first).
+  abortDrag();
   if (!e.state || !e.state.bl) return;
   const s = e.state;
   state.view.screen = s.view.screen;
@@ -1135,10 +1150,41 @@ function onGridClick(e) {
   // else: allow native anchor navigation (target=_blank)
 }
 
+// §5: drag-to-rearrange arms only in edit mode, on a single-account view, with
+// no active search. Everywhere else (normal mode, All view, search) the pointer
+// gesture stays byte-for-byte the classic 500ms long-press.
+function dragReorderAllowed() {
+  return state.view.editMode
+    && state.view.accountFilter !== 'all'
+    && state.view.query === '';
+}
+
 function onGridPointerDown(e) {
+  // A fresh gesture always starts with the click-swallow flags cleared, so a
+  // stale long-press/drag from a prior gesture can never eat this gesture's click.
+  suppressNextClick = false;
+  lpFired = false;
   const tile = e.target.closest('[data-kind]');
   if (!tile) return;
   if (e.target.closest('.tile__more')) return;
+
+  // §5: on a draggable link tile, arm the pending-drag path INSTEAD of the
+  // long-press timer. setPointerCapture keeps move/up/cancel flowing to the grid
+  // even after the source li is relocated (capture survives insertBefore).
+  if (dragReorderAllowed() && tile.dataset.kind === 'link') {
+    const bm = state.byId.get(tile.dataset.id);
+    if (bm) {
+      try { tile.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+      dragPending = {
+        pointerId: e.pointerId, li: tile, bm,
+        x0: e.clientX, y0: e.clientY,
+        timer: setTimeout(() => startDrag(null), 150),
+      };
+      return;
+    }
+  }
+
+  // Classic long-press (normal mode, All view, search, folder tiles).
   lpTile = tile;
   lpStart = { x: e.clientX, y: e.clientY };
   lpFired = false;
@@ -1151,19 +1197,225 @@ function onGridPointerDown(e) {
 }
 
 function onGridPointerMove(e) {
+  // §5: pending -> promote to a live drag once past the 8px threshold.
+  if (dragPending && e.pointerId === dragPending.pointerId) {
+    const dx = e.clientX - dragPending.x0, dy = e.clientY - dragPending.y0;
+    if (dx * dx + dy * dy > 64) startDrag(e);
+    return;
+  }
+  // §5: live drag just records the latest pointer; the rAF loop does the work.
+  if (dragSession && e.pointerId === dragSession.pointerId) {
+    dragSession.lastX = e.clientX;
+    dragSession.lastY = e.clientY;
+    return;
+  }
+  // Classic long-press cancel on a >10px move.
   if (!lpStart) return;
   const dx = e.clientX - lpStart.x, dy = e.clientY - lpStart.y;
   if (dx * dx + dy * dy > 100) { clearTimeout(lpTimer); lpStart = null; }
 }
 
+function onGridPointerUp(e) {
+  // §5 PENDING->IDLE: released before threshold -> let the native click run the
+  // edit-mode branch (opens the action sheet), exactly like a plain tap.
+  if (dragPending && e.pointerId === dragPending.pointerId) { clearDragPending(); return; }
+  // §5 DRAGGING->COMMIT.
+  if (dragSession && e.pointerId === dragSession.pointerId) { commitDrag(); return; }
+  clearLongPress();
+}
+
+function onGridPointerCancel(e) {
+  if (dragPending && e.pointerId === dragPending.pointerId) { clearDragPending(); return; }
+  if (dragSession && e.pointerId === dragSession.pointerId) { abortDrag(); return; }
+  clearLongPress();
+}
+
 function clearLongPress() { clearTimeout(lpTimer); lpStart = null; }
 
 function onGridClickCapture(e) {
+  // Swallow the click synthesized after a long-press OR after a committed/aborted
+  // drag, so neither re-opens the action sheet.
   if (lpFired) {
     e.preventDefault();
     e.stopPropagation();
     lpFired = false;
+  } else if (suppressNextClick) {
+    e.preventDefault();
+    e.stopPropagation();
+    suppressNextClick = false;
   }
+}
+
+/* ============================ Drag-to-rearrange (§5) ============================ */
+
+// Clear an armed-but-not-started pending drag (early release / abort).
+function clearDragPending() {
+  if (!dragPending) return;
+  clearTimeout(dragPending.timer);
+  try { dragPending.li.releasePointerCapture(dragPending.pointerId); } catch { /* ignore */ }
+  dragPending = null;
+}
+
+// §5 PENDING->DRAGGING: build the ghost, flag the source li as a placeholder,
+// start the rAF loop. `e` is the promoting pointermove, or null when promoted by
+// the 150ms hold timer (finger still ~stationary, so grab from x0/y0).
+function startDrag(e) {
+  if (!dragPending) return;
+  const p = dragPending;
+  clearTimeout(p.timer);
+  dragPending = null;
+
+  const li = p.li;
+  const px = e ? e.clientX : p.x0;
+  const py = e ? e.clientY : p.y0;
+
+  const inner = li.querySelector('.tile') || li;
+  const rect = inner.getBoundingClientRect();
+
+  // Ghost: a fixed, cloned tile that rides the finger (lazily created per drag).
+  const ghost = document.createElement('div');
+  ghost.id = 'drag-ghost';
+  ghost.style.width = rect.width + 'px';
+  ghost.style.height = rect.height + 'px';
+  ghost.appendChild(inner.cloneNode(true));
+  document.body.appendChild(ghost);
+
+  li.classList.add('grid__item--drag-source');
+
+  dragSession = {
+    pointerId: p.pointerId, li, bm: p.bm, ghost,
+    grabDx: px - rect.left, grabDy: py - rect.top,
+    lastX: px, lastY: py,
+    headerEl: document.querySelector('.header'),
+    raf: 0,
+  };
+  dragDirty = false;
+
+  if (navigator.vibrate) { try { navigator.vibrate(10); } catch { /* ignore */ } }
+
+  positionGhost(px, py);
+  dragSession.raf = requestAnimationFrame(dragFrame);
+}
+
+function positionGhost(px, py) {
+  const s = dragSession;
+  if (!s) return;
+  const x = px - s.grabDx, y = py - s.grabDy;
+  s.ghost.style.transform = `translate3d(${x}px, ${y}px, 0) scale(1.06)`;
+}
+
+// Autoscroll velocity for the current pointer Y: proportional within 72px of the
+// header bottom (up) or the viewport bottom (down), capped at ±14px/frame.
+function autoScrollVelocity(pointerY) {
+  const MARGIN = 72, MAX = 14;
+  const headerBottom = dragSession.headerEl ? dragSession.headerEl.getBoundingClientRect().bottom : 0;
+  const topZone = headerBottom + MARGIN;
+  if (pointerY < topZone) {
+    const k = Math.min(1, (topZone - pointerY) / MARGIN);
+    return -Math.ceil(k * MAX);
+  }
+  const bottomZone = window.innerHeight - MARGIN;
+  if (pointerY > bottomZone) {
+    const k = Math.min(1, (pointerY - bottomZone) / MARGIN);
+    return Math.ceil(k * MAX);
+  }
+  return 0;
+}
+
+// One rAF tick: reposition the ghost, autoscroll if near an edge, then re-run the
+// hit-test at the last pointer position (so scrolled content re-targets too).
+function dragFrame() {
+  const s = dragSession;
+  if (!s) return;
+  positionGhost(s.lastX, s.lastY);
+  const v = autoScrollVelocity(s.lastY);
+  if (v !== 0) window.scrollBy(0, v);
+  hitTestReorder(s.lastX, s.lastY);
+  s.raf = requestAnimationFrame(dragFrame);
+}
+
+// §5 hit-test: find the link tile under the finger; relocate the source li to the
+// near side of it. Folder tiles and gaps resolve to null -> no-op, so folders
+// (which always precede links) stay first and the source never crosses them.
+function hitTestReorder(px, py) {
+  const s = dragSession;
+  if (!s) return;
+  const src = s.li;
+  const el = document.elementFromPoint(px, py);
+  if (!el) return;
+  const t = el.closest('.grid__item[data-kind="link"]');
+  if (!t || t === src || !dom.grid.contains(t)) return;
+  if (src.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING) {
+    dom.grid.insertBefore(src, t.nextSibling);
+  } else {
+    dom.grid.insertBefore(src, t);
+  }
+}
+
+// Tear down ghost + placeholder + rAF loop + pointer capture. Leaves the DOM in
+// its dragged order (caller decides whether to commit or snap back).
+function teardownDrag() {
+  const s = dragSession;
+  dragSession = null;
+  if (!s) return;
+  if (s.raf) cancelAnimationFrame(s.raf);
+  try { s.li.releasePointerCapture(s.pointerId); } catch { /* ignore */ }
+  s.li.classList.remove('grid__item--drag-source');
+  if (s.ghost && s.ghost.parentNode) s.ghost.parentNode.removeChild(s.ghost);
+}
+
+// §5 ABORT (pointercancel / popstate / tab hidden): snap the grid back to the
+// stored order, write nothing. Also disarms a pending (not-yet-started) drag.
+function abortDrag() {
+  if (dragPending) clearDragPending();
+  if (!dragSession) return;
+  teardownDrag();
+  dragDirty = false;
+  suppressNextClick = true; // a mouse drag still emits a click on release
+  scheduleRender();
+}
+
+// §5.3 COMMIT: reassign order values by stable multiset — the post-drag DOM order
+// of the folder's direct link tiles gets those same records' order values sorted
+// ascending, so the value set is unchanged and nothing outside the group churns.
+function commitDrag() {
+  const wasDirty = dragDirty;
+  teardownDrag();
+  dragDirty = false;
+  suppressNextClick = true; // swallow the release-synthesized click
+
+  const accId = state.view.accountFilter;
+  const records = [];
+  for (const li of dom.grid.querySelectorAll('.grid__item[data-kind="link"]')) {
+    const r = state.byId.get(li.dataset.id);
+    if (r) records.push(r);
+  }
+  if (records.length < 2) { if (wasDirty) scheduleRender(); return; }
+
+  const sorted = records.map((r) => r.order).slice().sort((a, b) => a - b);
+  // Defensive: duplicate order values make positional assignment ambiguous —
+  // renumber the whole direct set above the account's current max.
+  const hasDup = new Set(sorted).size !== sorted.length;
+  const base = nextOrder(accId);
+  const assigned = hasDup ? records.map((_, i) => base + i) : sorted;
+
+  const changed = [];
+  records.forEach((r, i) => {
+    if (r.order !== assigned[i]) changed.push({ ...r, order: assigned[i] });
+  });
+  if (changed.length === 0) { if (wasDirty) scheduleRender(); return; }
+
+  storage.bulkPutBookmarks(changed).then(() => {
+    for (const nr of changed) {
+      const idx = state.bookmarks.findIndex((b) => b.id === nr.id);
+      if (idx >= 0) state.bookmarks[idx] = nr;
+    }
+    rebuildIndexes();
+    render();
+  }).catch(() => {
+    toast("Couldn't save the new order.");
+    render(); // snap back to the stored order
+  });
 }
 
 // Delegated favicon load/error handlers, shared by the grid and the
@@ -1977,8 +2229,13 @@ function wireEvents() {
   dom.grid.addEventListener('click', onGridClick);
   dom.grid.addEventListener('pointerdown', onGridPointerDown);
   dom.grid.addEventListener('pointermove', onGridPointerMove);
-  dom.grid.addEventListener('pointerup', clearLongPress);
-  dom.grid.addEventListener('pointercancel', clearLongPress);
+  dom.grid.addEventListener('pointerup', onGridPointerUp);
+  dom.grid.addEventListener('pointercancel', onGridPointerCancel);
+
+  // §5: a backgrounded tab aborts any live drag (teardown, no writes, snap back).
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') abortDrag();
+  });
 
   // §6: Frequently-used row shares the favicon fallback chain, but only a thin
   // click handler (no long-press / action sheet — no pointer handlers attached).
