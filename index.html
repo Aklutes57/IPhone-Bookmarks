@@ -6,8 +6,8 @@
   <title>Bookmark Launcher</title>
   <meta name="description" content="Your Chrome bookmarks as a phone-style app launcher.">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+  <meta id="meta-theme-light" name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+  <meta id="meta-theme-dark" name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
   <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
   <link rel="icon" href="./icons/icon-192.png" sizes="192x192" type="image/png">
   <link rel="apple-touch-icon" href="./icons/icon-180.png">
@@ -16,6 +16,11 @@
   <meta name="apple-mobile-web-app-title" content="Bookmarks">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <link rel="manifest" href="./manifest.webmanifest">
+  <script>
+    // FOUC guard: resolve and apply the theme before the stylesheet loads.
+    // (The one sanctioned inline script — kept tiny.)
+    (function(){try{var s=JSON.parse(localStorage.getItem('bl.settings')||'{}');var t=(s.theme==='light'||s.theme==='dark')?s.theme:(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.dataset.theme=t;document.documentElement.style.colorScheme=t;}catch(e){}})();
+  </script>
   <link rel="stylesheet" href="./css/app.css">
   <script type="module" src="./js/app.js"></script>
 </head>
@@ -66,6 +71,7 @@
     <button id="menu-add-bookmark" class="menu__item" role="menuitem" type="button">Add bookmark…</button>
     <button id="menu-toggle-edit" class="menu__item" role="menuitem" type="button" aria-pressed="false">Edit</button>
     <button id="menu-manage-accounts" class="menu__item" role="menuitem" type="button">Manage accounts…</button>
+    <button id="menu-settings" class="menu__item" role="menuitem" type="button">Settings…</button>
     <hr class="menu__sep">
     <button id="menu-help" class="menu__item" role="menuitem" type="button">Help</button>
   </div>
@@ -217,6 +223,45 @@
       <p><strong>Some tiles show a letter instead of a logo.</strong> That is completely normal. When a website does not offer a clear icon, we show the first letter of its name on a coloured tile instead. The bookmark still works the same way.</p>
       <p><strong>My bookmarks disappeared on iPhone.</strong> iPhones sometimes clear stored data for web apps that have not been opened in a while. If that happens, just import your bookmarks file again using the steps above and everything comes back.</p>
       <p><strong>The file would not import.</strong> Make sure you chose the <strong>.html</strong> file that Chrome exported, not a screenshot or a different document. If in doubt, export a fresh copy from your computer and try again.</p>
+    </div>
+  </dialog>
+
+  <dialog id="settings-sheet" class="sheet" aria-labelledby="settings-title">
+    <div class="sheet__grabber"></div>
+    <header class="dialog__header">
+      <h2 id="settings-title" class="dialog__title">Settings</h2>
+      <button id="settings-close" class="dialog__close icon-btn" type="button" aria-label="Close">✕</button>
+    </header>
+    <div class="dialog__body">
+      <div class="field">
+        <span class="field__label" id="theme-label">Appearance</span>
+        <div id="theme-choice" class="segmented" role="radiogroup" aria-labelledby="theme-label">
+          <button class="segmented__btn" type="button" role="radio" data-theme-value="system" aria-checked="false">System</button>
+          <button class="segmented__btn" type="button" role="radio" data-theme-value="light" aria-checked="false">Light</button>
+          <button class="segmented__btn" type="button" role="radio" data-theme-value="dark" aria-checked="false">Dark</button>
+        </div>
+      </div>
+      <div id="settings-chrome-row" class="field" hidden>
+        <label class="switch-row" for="settings-chrome-toggle">
+          <span class="switch-row__text">
+            <span class="switch-row__title">Open links in Chrome</span>
+            <span class="switch-row__note">Tiles open in the Chrome app instead of Safari.</span>
+          </span>
+          <input id="settings-chrome-toggle" class="switch" type="checkbox">
+        </label>
+        <p id="settings-chrome-note" class="dialog__note" hidden>If nothing happens when you tap a tile, Chrome may not be installed.</p>
+        <button id="settings-chrome-test" class="btn btn--ghost" type="button">Test it</button>
+      </div>
+      <div class="field">
+        <span class="field__label">Backup</span>
+        <div class="settings-actions">
+          <button id="settings-backup-btn" class="btn" type="button">Save backup…</button>
+          <button id="settings-restore-btn" class="btn btn--ghost" type="button">Restore backup…</button>
+          <input id="settings-restore-input" class="visually-hidden" type="file" accept=".json,application/json">
+        </div>
+        <p id="settings-backup-status" class="dialog__note">Never backed up.</p>
+        <p id="settings-restore-error" class="field__error" role="alert" hidden></p>
+      </div>
     </div>
   </dialog>
 

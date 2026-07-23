@@ -21,7 +21,7 @@ const state = {
   firstRun: false,
 };
 
-let settings = { v: 1, lastAccount: null, theme: 'system', helpSeen: false };
+let settings = { v: 2, lastAccount: null, theme: 'system', helpSeen: false, openInChrome: false, lastBackupAt: null };
 
 // Transient flow state.
 let importDraft = { file: null, parseResult: null };
@@ -55,7 +55,7 @@ function cacheDom() {
     'search-input', 'search-clear', 'account-chips',
     'breadcrumb', 'btn-folder-back', 'folder-title',
     'launcher', 'grid', 'no-results', 'no-results-term', 'empty-state', 'empty-import-btn',
-    'overflow-menu', 'menu-import', 'menu-add-bookmark', 'menu-toggle-edit', 'menu-manage-accounts', 'menu-help',
+    'overflow-menu', 'menu-import', 'menu-add-bookmark', 'menu-toggle-edit', 'menu-manage-accounts', 'menu-settings', 'menu-help',
     'import-sheet', 'import-close', 'import-form', 'import-dropzone', 'import-file-name', 'import-file-input',
     'import-account-label', 'import-label-list', 'import-replace-warn', 'import-summary', 'import-error',
     'import-cancel', 'import-confirm',
@@ -65,6 +65,11 @@ function cacheDom() {
     'action-sheet', 'action-sheet-title', 'action-open', 'action-edit', 'action-delete', 'action-cancel',
     'confirm-dialog', 'confirm-title', 'confirm-message', 'confirm-cancel', 'confirm-ok',
     'manage-accounts', 'manage-accounts-back', 'manage-accounts-list', 'manage-add-account',
+    'settings-sheet', 'settings-close', 'theme-choice',
+    'settings-chrome-row', 'settings-chrome-toggle', 'settings-chrome-note', 'settings-chrome-test',
+    'settings-backup-btn', 'settings-restore-btn', 'settings-restore-input',
+    'settings-backup-status', 'settings-restore-error',
+    'meta-theme-light', 'meta-theme-dark',
     'help-screen', 'help-close', 'toast-region',
     'tpl-tile-link', 'tpl-tile-folder', 'tpl-chip', 'tpl-account-row', 'tpl-toast',
   ];
@@ -148,10 +153,12 @@ function loadSettings() {
       const p = JSON.parse(raw);
       if (p && typeof p === 'object') {
         settings = {
-          v: 1,
+          v: 2,
           lastAccount: (typeof p.lastAccount === 'string') ? p.lastAccount : null,
-          theme: p.theme || 'system',
+          theme: (p.theme === 'light' || p.theme === 'dark') ? p.theme : 'system',
           helpSeen: !!p.helpSeen,
+          openInChrome: p.openInChrome === true,
+          lastBackupAt: (typeof p.lastBackupAt === 'number') ? p.lastBackupAt : null,
         };
       }
     }
@@ -159,7 +166,7 @@ function loadSettings() {
 }
 
 function saveSettings(patch) {
-  settings = { ...settings, ...patch, v: 1 };
+  settings = { ...settings, ...patch, v: 2 };
   try { localStorage.setItem('bl.settings', JSON.stringify(settings)); } catch { /* ignore */ }
 }
 
@@ -170,6 +177,65 @@ function maybeRequestPersist() {
       localStorage.setItem('bl.persistRequested', '1');
     }
   } catch { /* ignore */ }
+}
+
+/* ============================ Theme ============================ */
+
+const THEME_COLORS = { light: '#f6f7f9', dark: '#0f1115' };
+let themeMql = null;
+
+function onSystemThemeChange() {
+  // Attached only while in 'system' mode; re-resolve when the OS preference flips.
+  if (settings.theme === 'system') applyTheme();
+}
+
+// Resolve settings.theme to an effective light|dark, stamp it on <html>, keep
+// the two theme-color metas honest, and (de)activate the system-preference
+// listener. Called at boot, on segmented change, and on system-preference flip.
+function applyTheme() {
+  if (!themeMql) themeMql = window.matchMedia('(prefers-color-scheme: dark)');
+  const stored = settings.theme;
+  const effective = (stored === 'light' || stored === 'dark')
+    ? stored
+    : (themeMql.matches ? 'dark' : 'light');
+  const root = document.documentElement;
+  root.dataset.theme = effective;
+  root.style.colorScheme = effective;
+
+  const metaLight = dom['meta-theme-light'];
+  const metaDark = dom['meta-theme-dark'];
+  if (stored === 'system') {
+    // Let the media attributes drive: keep the per-scheme defaults.
+    if (metaLight) metaLight.setAttribute('content', THEME_COLORS.light);
+    if (metaDark) metaDark.setAttribute('content', THEME_COLORS.dark);
+  } else {
+    // Forced: both metas carry the forced color so whichever media matches wins.
+    const c = THEME_COLORS[effective];
+    if (metaLight) metaLight.setAttribute('content', c);
+    if (metaDark) metaDark.setAttribute('content', c);
+  }
+
+  if (stored === 'system') themeMql.addEventListener('change', onSystemThemeChange);
+  else themeMql.removeEventListener('change', onSystemThemeChange);
+}
+
+function syncThemeChoice() {
+  const btns = dom['theme-choice'].querySelectorAll('.segmented__btn');
+  for (const b of btns) {
+    b.setAttribute('aria-checked', b.dataset.themeValue === settings.theme ? 'true' : 'false');
+  }
+}
+
+function renderBackupStatus() {
+  dom['settings-backup-status'].textContent = settings.lastBackupAt
+    ? `Last backed up: ${humanizeTime(settings.lastBackupAt)}`
+    : 'Never backed up.';
+}
+
+function openSettingsSheet() {
+  syncThemeChoice();
+  renderBackupStatus();
+  openSheet('settings-sheet');
 }
 
 /* ============================ Indexes ============================ */
@@ -1351,6 +1417,7 @@ function wireEvents() {
     setEditMode(!state.view.editMode);
   });
   dom['menu-manage-accounts'].addEventListener('click', () => { hidePopover(); openAccountsScreen(); });
+  dom['menu-settings'].addEventListener('click', () => { hidePopover(); openSettingsSheet(); });
   dom['menu-help'].addEventListener('click', () => { hidePopover(); openHelpScreen(); });
 
   // Import sheet.
@@ -1410,8 +1477,20 @@ function wireEvents() {
   // Help.
   dom['help-close'].addEventListener('click', () => closeSheet());
 
+  // Settings sheet.
+  dom['settings-close'].addEventListener('click', () => closeSheet());
+  dom['theme-choice'].addEventListener('click', (e) => {
+    const btn = e.target.closest('.segmented__btn');
+    if (!btn) return;
+    const val = btn.dataset.themeValue;
+    if (val !== 'system' && val !== 'light' && val !== 'dark') return;
+    saveSettings({ theme: val });
+    applyTheme();
+    syncThemeChoice();
+  });
+
   // Esc/cancel on every dialog routes through history so DOM + state stay in sync.
-  for (const id of ['import-sheet', 'bookmark-modal', 'action-sheet', 'confirm-dialog', 'manage-accounts', 'help-screen']) {
+  for (const id of ['import-sheet', 'bookmark-modal', 'action-sheet', 'confirm-dialog', 'manage-accounts', 'settings-sheet', 'help-screen']) {
     dom[id].addEventListener('cancel', (e) => { e.preventDefault(); closeSheet(); });
   }
 }
@@ -1435,7 +1514,12 @@ function advanceFavicon(img) {
 async function boot() {
   cacheDom();
   loadSettings();
+  applyTheme();
   wireEvents();
+
+  storage.setVersionChangeHandler(() => {
+    toast('Updated in another tab — tap to reload', { duration: 0, action: () => location.reload() });
+  });
 
   try {
     await storage.init();

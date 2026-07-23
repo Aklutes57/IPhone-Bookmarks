@@ -1,6 +1,8 @@
 /* =========================================================================
    Bookmark Launcher — app.css
-   Token system + component styles. Light default, dark via prefers-color-scheme.
+   Token system + component styles. Light default, dark via [data-theme="dark"]
+   (resolved from settings + system preference by app.js; see the FOUC guard in
+   index.html and applyTheme()).
    ========================================================================= */
 
 /* ---------- Design tokens ---------- */
@@ -74,25 +76,23 @@
   --z-toast: 1000;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0f1115;
-    --bg-elevated: #1a1d24;
-    --bg-sunken: #24272f;
-    --text: #eef0f4;
-    --text-muted: #a4a9b6;
-    --text-faint: #6d7382;
-    --border: #2a2e37;
-    --border-strong: #3a3f4b;
-    --accent-tint: #222a44;
-    --accent-text: #9fb0f8;
-    --danger: #e5564f;
-    --danger-tint: #3a2020;
-    --focus-ring: #7b8ff4;
-    --scrim: rgba(0, 0, 0, .55);
-    --shadow-1: 0 1px 2px rgba(0, 0, 0, .40);
-    --shadow-2: 0 12px 34px rgba(0, 0, 0, .55), 0 2px 8px rgba(0, 0, 0, .4);
-  }
+:root[data-theme="dark"] {
+  --bg: #0f1115;
+  --bg-elevated: #1a1d24;
+  --bg-sunken: #24272f;
+  --text: #eef0f4;
+  --text-muted: #a4a9b6;
+  --text-faint: #6d7382;
+  --border: #2a2e37;
+  --border-strong: #3a3f4b;
+  --accent-tint: #222a44;
+  --accent-text: #9fb0f8;
+  --danger: #e5564f;
+  --danger-tint: #3a2020;
+  --focus-ring: #7b8ff4;
+  --scrim: rgba(0, 0, 0, .55);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .40);
+  --shadow-2: 0 12px 34px rgba(0, 0, 0, .55), 0 2px 8px rgba(0, 0, 0, .4);
 }
 
 /* ---------- Reset / base ---------- */
@@ -365,9 +365,7 @@ img { max-width: 100%; }
 }
 .tile--hasicon .tile__letter { display: none; }
 
-@media (prefers-color-scheme: dark) {
-  .tile__letter { background: hsl(var(--tile-hue, 220) 50% 52%); }
-}
+[data-theme="dark"] .tile__letter { background: hsl(var(--tile-hue, 220) 50% 52%); }
 
 /* Folder tile */
 .tile__icon--folder { background: var(--accent-tint); }
@@ -753,6 +751,82 @@ select.field__input { padding-right: var(--space-2); }
 }
 .help li { margin-bottom: var(--space-1); }
 .help strong { color: var(--text); }
+
+/* ---------- Settings ---------- */
+.segmented {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  background: var(--bg-sunken);
+  border-radius: var(--radius-md);
+}
+.segmented__btn {
+  flex: 1 1 0;
+  min-height: 36px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+.segmented__btn[aria-checked="true"] {
+  background: var(--accent-tint);
+  color: var(--accent-text);
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  cursor: pointer;
+}
+.switch-row__text {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.switch-row__title { font-weight: 600; }
+.switch-row__note {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+.switch {
+  flex: 0 0 auto;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 51px;
+  height: 31px;
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+  position: relative;
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease);
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 27px;
+  height: 27px;
+  border-radius: var(--radius-full);
+  background: #fff;
+  box-shadow: var(--shadow-1);
+  transition: transform var(--dur-2) var(--ease);
+}
+.switch:checked { background: var(--accent); }
+.switch:checked::after { transform: translateX(20px); }
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
 
 /* ---------- Toasts ---------- */
 .toast-region {
