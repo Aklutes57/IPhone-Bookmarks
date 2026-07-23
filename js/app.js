@@ -15,6 +15,7 @@ const state = {
   bookmarks: [],              // all bookmark records
   byId: new Map(),            // id -> bookmark
   byAccount: new Map(),       // accountId -> bookmark[] (sorted by order asc)
+  usage: new Map(),           // §6: url -> { count, lastAt } (keyed by exact bookmark URL)
   view: { screen: 'home', accountFilter: 'all', folderPath: [], query: '', editMode: false },
   ui: { sheet: null },        // id of the open <dialog> sheet, or null
   ready: false,
@@ -59,7 +60,7 @@ function cacheDom() {
   const ids = [
     'search-input', 'search-clear', 'account-chips',
     'breadcrumb', 'btn-folder-back', 'folder-title',
-    'launcher', 'grid', 'no-results', 'no-results-term', 'empty-state', 'empty-import-btn',
+    'launcher', 'frequent-row', 'frequent-list', 'grid', 'no-results', 'no-results-term', 'empty-state', 'empty-import-btn',
     'overflow-menu', 'menu-import', 'menu-add-bookmark', 'menu-toggle-edit', 'menu-manage-accounts', 'menu-settings', 'menu-help',
     'import-sheet', 'import-close', 'import-form', 'import-dropzone', 'import-file-name', 'import-file-input',
     'import-account-label', 'import-label-list', 'import-replace-warn', 'import-summary', 'import-error',
@@ -502,9 +503,8 @@ async function onRestoreFile(file) {
   state.accounts = new Map(clean.accounts.map((a) => [a.id, a]));
   state.bookmarks = clean.bookmarks;
   rebuildIndexes();
-  if (state.usage instanceof Map) {
-    state.usage = new Map(clean.usage.map((u) => [u.key, { count: u.count, lastAt: u.lastAt }]));
-  }
+  // §6: rebuild the usage map from the restored records (URL-keyed).
+  state.usage = new Map(clean.usage.map((u) => [u.key, { count: u.count, lastAt: u.lastAt }]));
 
   // Apply settings from the backup; keep device-local helpSeen + lastBackupAt.
   const bk = (data.settings && typeof data.settings === 'object') ? data.settings : {};
@@ -658,6 +658,53 @@ function accountsSorted() {
   return accs;
 }
 
+/* ============================ Usage / frequently-used (§6) ============================ */
+
+// Record one tap on a bookmark: bump the in-memory usage map (keyed by the exact
+// URL, so counts survive re-import / rename / cross-account dupes) and persist
+// fire-and-forget. Taps in edit mode never count, which also covers the
+// action-sheet Open item reached from a long-press in edit mode.
+function recordTap(bm) {
+  if (state.view.editMode) return;
+  if (!bm || typeof bm.url !== 'string' || bm.url === '') return;
+  const prev = state.usage.get(bm.url);
+  const count = (prev ? prev.count : 0) + 1;
+  const lastAt = nowSec();
+  state.usage.set(bm.url, { count, lastAt });
+  storage.putUsage({ key: bm.url, count, lastAt }).catch(() => { /* fire-and-forget */ });
+}
+
+// Boot-time cleanup: drop usage rows whose URL matches no current bookmark.
+// Runs AFTER indexes are built; the delete is fire-and-forget.
+function pruneOrphanUsage() {
+  if (!(state.usage instanceof Map) || state.usage.size === 0) return;
+  const urls = new Set();
+  for (const b of state.bookmarks) urls.add(b.url);
+  const orphans = [];
+  for (const key of state.usage.keys()) if (!urls.has(key)) orphans.push(key);
+  if (orphans.length === 0) return;
+  for (const key of orphans) state.usage.delete(key);
+  storage.deleteUsageKeys(orphans).catch(() => { /* fire-and-forget */ });
+}
+
+// Candidates for the Frequently-used row: bookmarks in the active working set
+// (respecting the account chip) whose URL has count>=2. First match wins on
+// cross-account same-URL dupes; ranked count desc then lastAt desc.
+function frequentCandidates() {
+  const work = workingSet(state.view.accountFilter);
+  const seen = new Set();
+  const out = [];
+  for (const b of work) {
+    if (seen.has(b.url)) continue;
+    const u = state.usage.get(b.url);
+    if (!u || u.count < 2) continue;
+    seen.add(b.url);
+    out.push({ bm: b, count: u.count, lastAt: u.lastAt });
+  }
+  out.sort((a, b) => (b.count !== a.count ? b.count - a.count : b.lastAt - a.lastAt));
+  return out;
+}
+
 /* ============================ Rendering ============================ */
 
 let renderScheduled = false;
@@ -675,6 +722,7 @@ function render() {
   dom.launcher.classList.toggle('is-editing', state.view.editMode);
 
   renderChips();
+  renderFrequent();
 
   const searching = state.view.query.trim() !== '';
   const inFolder = state.view.folderPath.length > 0;
@@ -739,6 +787,9 @@ function makeChip(id, label) {
 
 /* --- Keyed tile pool --- */
 const tilePool = new Map(); // key -> li
+// §6: SEPARATE pool for the Frequently-used row (keyed 'q:'+id) — never shared
+// with tilePool so the same bookmark can appear in both the row and the grid.
+const freqPool = new Map(); // key -> li
 
 function renderGrid(cells) {
   const frag = document.createDocumentFragment();
@@ -759,6 +810,48 @@ function renderGrid(cells) {
   }
   dom.grid.replaceChildren(frag);
   for (const k of [...tilePool.keys()]) if (!used.has(k)) tilePool.delete(k);
+}
+
+// §6: render the Frequently-used row. Shown only at a folder root, with no
+// active search, outside edit mode, and only when at least 3 bookmarks in the
+// active working set qualify (count>=2). Capped at 8, ranked by frequentCandidates.
+function renderFrequent() {
+  const row = dom['frequent-row'];
+  const eligible = state.view.folderPath.length === 0
+    && state.view.query === ''
+    && !state.view.editMode;
+  if (!eligible) { row.hidden = true; return; }
+
+  const cands = frequentCandidates();
+  if (cands.length < 3) { row.hidden = true; return; }
+
+  const top = cands.slice(0, 8);
+  const frag = document.createDocumentFragment();
+  const used = new Set();
+  for (const c of top) {
+    const key = 'q:' + c.bm.id;
+    used.add(key);
+    let li = freqPool.get(key);
+    if (!li) {
+      li = buildFreqTile(c.bm);
+      freqPool.set(key, li);
+    } else {
+      populateBookmarkTile(li, c.bm);
+    }
+    frag.appendChild(li);
+  }
+  dom['frequent-list'].replaceChildren(frag);
+  for (const k of [...freqPool.keys()]) if (!used.has(k)) freqPool.delete(k);
+  row.hidden = false;
+}
+
+function buildFreqTile(bm) {
+  const li = dom['tpl-tile-link'].content.firstElementChild.cloneNode(true);
+  li.dataset.id = bm.id;
+  li.dataset.kind = 'link';
+  li.dataset.key = 'q:' + bm.id;
+  populateBookmarkTile(li, bm);
+  return li;
 }
 
 function bookmarkSig(bm) {
@@ -1026,13 +1119,19 @@ function onGridClick(e) {
     openActionSheet(li);
     return;
   }
-  // Not editing: honor Open-in-Chrome (§1). Never mutates the anchor href, so
-  // long-press / copy / open-in-new-tab keep working on the untouched link.
+  // Not editing: honor Open-in-Chrome (§1) and record the tap (§6). Never
+  // mutates the anchor href, so long-press / copy / open-in-new-tab keep
+  // working on the untouched link.
   const bm = state.byId.get(li.dataset.id);
-  if (bm && settings.openInChrome && IS_IOS) {
-    /* recordTap(bm) — usage recording lands in M4 (§6) */
+  if (!bm) return;
+  if (settings.openInChrome && IS_IOS) {
+    recordTap(bm);
     if (openViaChromeScheme(bm.url)) { e.preventDefault(); return; }
+    return; // non-http URL (helper no-op): fall through to native anchor nav
   }
+  // §6: record before the native anchor navigation (delegation runs before the
+  // browser follows the target=_blank link; this page persists).
+  recordTap(bm);
   // else: allow native anchor navigation (target=_blank)
 }
 
@@ -1065,6 +1164,39 @@ function onGridClickCapture(e) {
     e.stopPropagation();
     lpFired = false;
   }
+}
+
+// Delegated favicon load/error handlers, shared by the grid and the
+// Frequently-used row (both hold .tile__favicon images).
+function onTileFaviconLoad(e) {
+  const img = e.target;
+  if (!(img instanceof HTMLImageElement) || !img.classList.contains('tile__favicon')) return;
+  const tile = img.closest('.tile');
+  if (tile) tile.classList.add('tile--hasicon');
+}
+
+function onTileFaviconError(e) {
+  const img = e.target;
+  if (!(img instanceof HTMLImageElement) || !img.classList.contains('tile__favicon')) return;
+  advanceFavicon(img);
+}
+
+// §6: Frequently-used row click — exactly the grid link logic (Chrome
+// interception + recordTap). The row is hidden in edit mode; the guard is kept
+// for consistency. No long-press / action sheet is wired for these tiles.
+function onFrequentClick(e) {
+  const li = e.target.closest('[data-kind]');
+  if (!li) return;
+  if (state.view.editMode) { e.preventDefault(); return; }
+  const bm = state.byId.get(li.dataset.id);
+  if (!bm) return;
+  if (settings.openInChrome && IS_IOS) {
+    recordTap(bm);
+    if (openViaChromeScheme(bm.url)) { e.preventDefault(); return; }
+    return;
+  }
+  recordTap(bm);
+  // else: allow native anchor navigation (target=_blank)
 }
 
 /* ============================ Action sheet ============================ */
@@ -1103,7 +1235,7 @@ function openActionSheet(tileEl) {
 function onActionOpen() {
   if (!actionCtx) return;
   if (actionCtx.kind === 'link') {
-    /* recordTap(actionCtx.bookmark) — usage recording lands in M4 (§6) */
+    recordTap(actionCtx.bookmark); // §6 (no-op in edit mode)
     if (settings.openInChrome && IS_IOS) {
       openViaChromeScheme(actionCtx.bookmark.url);
     } else {
@@ -1839,23 +1971,20 @@ function registerServiceWorker() {
 
 function wireEvents() {
   // Grid: delegated favicon load/error (capture), click, long-press.
-  dom.grid.addEventListener('load', (e) => {
-    const img = e.target;
-    if (!(img instanceof HTMLImageElement) || !img.classList.contains('tile__favicon')) return;
-    const tile = img.closest('.tile');
-    if (tile) tile.classList.add('tile--hasicon');
-  }, true);
-  dom.grid.addEventListener('error', (e) => {
-    const img = e.target;
-    if (!(img instanceof HTMLImageElement) || !img.classList.contains('tile__favicon')) return;
-    advanceFavicon(img);
-  }, true);
+  dom.grid.addEventListener('load', onTileFaviconLoad, true);
+  dom.grid.addEventListener('error', onTileFaviconError, true);
   dom.grid.addEventListener('click', onGridClickCapture, true);
   dom.grid.addEventListener('click', onGridClick);
   dom.grid.addEventListener('pointerdown', onGridPointerDown);
   dom.grid.addEventListener('pointermove', onGridPointerMove);
   dom.grid.addEventListener('pointerup', clearLongPress);
   dom.grid.addEventListener('pointercancel', clearLongPress);
+
+  // §6: Frequently-used row shares the favicon fallback chain, but only a thin
+  // click handler (no long-press / action sheet — no pointer handlers attached).
+  dom['frequent-list'].addEventListener('load', onTileFaviconLoad, true);
+  dom['frequent-list'].addEventListener('error', onTileFaviconError, true);
+  dom['frequent-list'].addEventListener('click', onFrequentClick);
 
   // Chips.
   dom['account-chips'].addEventListener('click', (e) => {
@@ -2040,13 +2169,18 @@ async function boot() {
 
   try {
     await storage.init();
-    const [accounts, bookmarks] = await Promise.all([storage.getAllAccounts(), storage.getAllBookmarks()]);
+    const [accounts, bookmarks, usage] = await Promise.all([
+      storage.getAllAccounts(), storage.getAllBookmarks(), storage.getAllUsage(),
+    ]);
     state.accounts = new Map(accounts.map((a) => [a.id, a]));
     state.bookmarks = bookmarks;
+    state.usage = new Map(usage.map((u) => [u.key, { count: u.count, lastAt: u.lastAt }]));
     rebuildIndexes();
+    pruneOrphanUsage(); // §6: after indexes, drop usage rows with no matching URL
   } catch {
     state.accounts = new Map();
     state.bookmarks = [];
+    state.usage = new Map();
     rebuildIndexes();
     toast('Your browser is blocking local storage');
   }

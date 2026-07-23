@@ -439,6 +439,38 @@ img { max-width: 100%; }
 .launcher.is-editing .grid__item:nth-child(2n) .tile { animation-delay: .08s; }
 .launcher.is-editing .grid__item:nth-child(3n) .tile { animation-delay: .16s; }
 
+/* ---------- Frequently used row (§6) ---------- */
+.frequent {
+  --tile-icon: 52px;
+  border-bottom: 1px solid var(--border);
+}
+.frequent__title {
+  margin: 0;
+  padding: var(--space-3) var(--space-4) 0;
+  padding-left: calc(var(--space-4) + env(safe-area-inset-left));
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.frequent__scroll {
+  display: flex;
+  gap: var(--grid-gap);
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  padding-left: calc(var(--space-4) + env(safe-area-inset-left));
+  padding-right: calc(var(--space-4) + env(safe-area-inset-right));
+  list-style: none;
+}
+.frequent__scroll::-webkit-scrollbar { display: none; }
+.frequent .grid__item {
+  flex: 0 0 var(--tile-min);
+  content-visibility: visible;
+}
+.frequent .tile__more { display: none; }
+
 /* ---------- Empty / no-results ---------- */
 .empty-state {
   display: flex;
