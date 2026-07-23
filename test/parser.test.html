@@ -164,6 +164,43 @@ const ff = parseNetscape(firefox);
 check('firefox sample → ok:true', ff.ok === true);
 check('firefox sample → >=1 bookmark', ff.bookmarks && ff.bookmarks.length >= 1);
 
+// ============================ Safari-style sample ============================
+// Safari exports use plain (non-toolbar) H3 folders and omit ADD_DATE and ICON.
+// A top-level "Favourites" folder is expected: Safari has no personal-toolbar
+// folder to hoist, so its contents stay one level down (acceptable per design).
+const safari = `<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">
+<TITLE>Bookmarks</TITLE>
+<H1>Bookmarks</H1>
+<DL><p>
+    <DT><H3 FOLDED>Favourites</H3>
+    <DL><p>
+        <DT><A HREF="https://www.apple.com/">Apple</A>
+    </DL><p>
+    <DT><A HREF="https://news.ycombinator.com/">Hacker News</A>
+</DL><p>
+`;
+const s = parseNetscape(safari);
+const sb = (s && s.bookmarks) || [];
+
+check('safari sample → ok:true', s.ok === true);
+check('safari sample → 2 bookmarks', sb.length === 2);
+check('safari sample → folderCount 1', s.folderCount === 1);
+
+// [0] Apple @ Favourites (non-toolbar folder; not hoisted)
+check('safari [0] title Apple', sb[0] && sb[0].title === 'Apple');
+check('safari [0] url https://www.apple.com/', sb[0] && sb[0].url === 'https://www.apple.com/');
+check("safari [0] path ['Favourites']", sb[0] && arrEq(sb[0].path, ['Favourites']));
+check('safari [0] addDate null', sb[0] && sb[0].addDate === null);
+check('safari [0] icon null', sb[0] && sb[0].icon === null);
+
+// [1] Hacker News @ root (sibling of the Favourites folder)
+check('safari [1] title Hacker News', sb[1] && sb[1].title === 'Hacker News');
+check('safari [1] url https://news.ycombinator.com/', sb[1] && sb[1].url === 'https://news.ycombinator.com/');
+check('safari [1] path []', sb[1] && arrEq(sb[1].path, []));
+check('safari [1] addDate null', sb[1] && sb[1].addDate === null);
+check('safari [1] icon null', sb[1] && sb[1].icon === null);
+
 // ============================ Render summary ============================
 const resultsEl = document.getElementById('results');
 const pre = document.createElement('pre');
