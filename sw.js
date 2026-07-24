@@ -9,7 +9,7 @@
 // VERSION below. The shell cache key is derived from VERSION, so bumping it is
 // the single knob that invalidates stale shells on the next activate.
 
-const VERSION = "v1";
+const VERSION = "v2";
 const SHELL_CACHE = `shell-${VERSION}`;
 const FAVICON_CACHE = "favicons";
 const FAVICON_MAX = 500;
