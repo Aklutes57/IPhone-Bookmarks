@@ -15,13 +15,14 @@ const state = {
   bookmarks: [],              // all bookmark records
   byId: new Map(),            // id -> bookmark
   byAccount: new Map(),       // accountId -> bookmark[] (sorted by order asc)
+  usage: new Map(),           // §6: url -> { count, lastAt } (keyed by exact bookmark URL)
   view: { screen: 'home', accountFilter: 'all', folderPath: [], query: '', editMode: false },
   ui: { sheet: null },        // id of the open <dialog> sheet, or null
   ready: false,
   firstRun: false,
 };
 
-let settings = { v: 1, lastAccount: null, theme: 'system', helpSeen: false };
+let settings = { v: 2, lastAccount: null, theme: 'system', helpSeen: false, openInChrome: false, lastBackupAt: null };
 
 // Transient flow state.
 let importDraft = { file: null, parseResult: null };
@@ -35,6 +36,15 @@ let pendingConfirm = null;    // { resolve } for the active confirmDialog
 // Long-press tracking.
 let lpTimer = null, lpStart = null, lpFired = false, lpTile = null;
 
+// §5: drag-to-rearrange. dragPending holds the armed-but-not-yet-dragging state
+// (150ms hold or >8px move promotes it); dragSession is the live drag; dragDirty
+// records that a render() was suppressed mid-drag; suppressNextClick swallows the
+// synthetic click a mouse/touch drag emits on release (mirrors the lpFired swallow).
+let dragPending = null;   // { pointerId, li, bm, x0, y0, timer }
+let dragSession = null;   // { pointerId, li, bm, ghost, grabDx, grabDy, lastX, lastY, headerEl, raf }
+let dragDirty = false;
+let suppressNextClick = false;
+
 // Service worker.
 let swReg = null, lastUpdateCheck = 0, reloadedForUpdate = false;
 
@@ -45,6 +55,11 @@ let toastTimer = null;
 const BLANK_IMG = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
 const SEP = '␟';
 
+// Cached once at boot. iPadOS Safari reports a Mac UA, so treat a "Mac" UA with
+// multi-touch as iOS too. Gates the Open-in-Chrome feature (§1).
+const IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent)
+  || (navigator.userAgent.includes('Mac') && navigator.maxTouchPoints > 1);
+
 /* ============================ DOM cache ============================ */
 
 const dom = {};
@@ -54,22 +69,29 @@ function cacheDom() {
   const ids = [
     'search-input', 'search-clear', 'account-chips',
     'breadcrumb', 'btn-folder-back', 'folder-title',
-    'launcher', 'grid', 'no-results', 'no-results-term', 'empty-state', 'empty-import-btn',
-    'overflow-menu', 'menu-import', 'menu-add-bookmark', 'menu-toggle-edit', 'menu-manage-accounts', 'menu-help',
+    'launcher', 'frequent-row', 'frequent-list', 'grid', 'no-results', 'no-results-term', 'empty-state', 'empty-import-btn',
+    'overflow-menu', 'menu-import', 'menu-add-bookmark', 'menu-toggle-edit', 'menu-manage-accounts', 'menu-settings', 'menu-help',
     'import-sheet', 'import-close', 'import-form', 'import-dropzone', 'import-file-name', 'import-file-input',
     'import-account-label', 'import-label-list', 'import-replace-warn', 'import-summary', 'import-error',
     'import-cancel', 'import-confirm',
     'bookmark-modal', 'bookmark-modal-title', 'bookmark-close', 'bookmark-form', 'bookmark-id-input',
     'bookmark-title-input', 'bookmark-url-input', 'bookmark-account-select', 'bookmark-folder-select',
-    'bookmark-newfolder', 'bookmark-newfolder-input', 'bookmark-error', 'bookmark-cancel', 'bookmark-save',
-    'action-sheet', 'action-sheet-title', 'action-open', 'action-edit', 'action-delete', 'action-cancel',
+    'bookmark-newfolder', 'bookmark-newfolder-parent', 'bookmark-newfolder-input',
+    'bookmark-color-field', 'bookmark-color-row', 'bookmark-error', 'bookmark-cancel', 'bookmark-save',
+    'action-sheet', 'action-sheet-title', 'action-open', 'action-edit', 'action-move', 'action-delete', 'action-cancel',
     'confirm-dialog', 'confirm-title', 'confirm-message', 'confirm-cancel', 'confirm-ok',
     'manage-accounts', 'manage-accounts-back', 'manage-accounts-list', 'manage-add-account',
+    'settings-sheet', 'settings-close', 'theme-choice',
+    'settings-chrome-row', 'settings-chrome-toggle', 'settings-chrome-note', 'settings-chrome-test',
+    'settings-backup-btn', 'settings-restore-btn', 'settings-restore-input',
+    'settings-backup-status', 'settings-restore-error',
+    'meta-theme-light', 'meta-theme-dark',
     'help-screen', 'help-close', 'toast-region',
     'tpl-tile-link', 'tpl-tile-folder', 'tpl-chip', 'tpl-account-row', 'tpl-toast',
   ];
   for (const id of ids) dom[id] = $(id);
   // Field wrappers for the bookmark modal.
+  dom.titleWrap = dom['bookmark-title-input'].closest('.field');
   dom.urlWrap = dom['bookmark-url-input'].closest('.field');
   dom.accountWrap = dom['bookmark-account-select'].closest('.field');
   dom.folderWrap = dom['bookmark-folder-select'].closest('.field');
@@ -113,6 +135,19 @@ function isPrefix(P, path) {
   return true;
 }
 
+function pathsEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+// §8: first https?:// token in a shared "text" param, else ''.
+function firstHttpUrlIn(text) {
+  if (!text) return '';
+  const m = String(text).match(/https?:\/\/\S+/);
+  return m ? m[0] : '';
+}
+
 function domainOf(u) {
   const host = u.hostname.toLowerCase();
   return (/^www\./i.test(host) && host.slice(4).includes('.')) ? host.slice(4) : host;
@@ -148,10 +183,12 @@ function loadSettings() {
       const p = JSON.parse(raw);
       if (p && typeof p === 'object') {
         settings = {
-          v: 1,
+          v: 2,
           lastAccount: (typeof p.lastAccount === 'string') ? p.lastAccount : null,
-          theme: p.theme || 'system',
+          theme: (p.theme === 'light' || p.theme === 'dark') ? p.theme : 'system',
           helpSeen: !!p.helpSeen,
+          openInChrome: p.openInChrome === true,
+          lastBackupAt: (typeof p.lastBackupAt === 'number') ? p.lastBackupAt : null,
         };
       }
     }
@@ -159,7 +196,7 @@ function loadSettings() {
 }
 
 function saveSettings(patch) {
-  settings = { ...settings, ...patch, v: 1 };
+  settings = { ...settings, ...patch, v: 2 };
   try { localStorage.setItem('bl.settings', JSON.stringify(settings)); } catch { /* ignore */ }
 }
 
@@ -170,6 +207,337 @@ function maybeRequestPersist() {
       localStorage.setItem('bl.persistRequested', '1');
     }
   } catch { /* ignore */ }
+}
+
+/* ============================ Theme ============================ */
+
+const THEME_COLORS = { light: '#f6f7f9', dark: '#0f1115' };
+let themeMql = null;
+
+function onSystemThemeChange() {
+  // Attached only while in 'system' mode; re-resolve when the OS preference flips.
+  if (settings.theme === 'system') applyTheme();
+}
+
+// Resolve settings.theme to an effective light|dark, stamp it on <html>, keep
+// the two theme-color metas honest, and (de)activate the system-preference
+// listener. Called at boot, on segmented change, and on system-preference flip.
+function applyTheme() {
+  if (!themeMql) themeMql = window.matchMedia('(prefers-color-scheme: dark)');
+  const stored = settings.theme;
+  const effective = (stored === 'light' || stored === 'dark')
+    ? stored
+    : (themeMql.matches ? 'dark' : 'light');
+  const root = document.documentElement;
+  root.dataset.theme = effective;
+  root.style.colorScheme = effective;
+
+  const metaLight = dom['meta-theme-light'];
+  const metaDark = dom['meta-theme-dark'];
+  if (stored === 'system') {
+    // Let the media attributes drive: keep the per-scheme defaults.
+    if (metaLight) metaLight.setAttribute('content', THEME_COLORS.light);
+    if (metaDark) metaDark.setAttribute('content', THEME_COLORS.dark);
+  } else {
+    // Forced: both metas carry the forced color so whichever media matches wins.
+    const c = THEME_COLORS[effective];
+    if (metaLight) metaLight.setAttribute('content', c);
+    if (metaDark) metaDark.setAttribute('content', c);
+  }
+
+  if (stored === 'system') themeMql.addEventListener('change', onSystemThemeChange);
+  else themeMql.removeEventListener('change', onSystemThemeChange);
+}
+
+function syncThemeChoice() {
+  const btns = dom['theme-choice'].querySelectorAll('.segmented__btn');
+  for (const b of btns) {
+    b.setAttribute('aria-checked', b.dataset.themeValue === settings.theme ? 'true' : 'false');
+  }
+}
+
+function renderBackupStatus() {
+  dom['settings-backup-status'].textContent = settings.lastBackupAt
+    ? `Last backed up: ${humanizeTime(settings.lastBackupAt)}`
+    : 'Never backed up.';
+}
+
+function openSettingsSheet() {
+  syncThemeChoice();
+  syncChromeToggle();
+  renderBackupStatus();
+  hideRestoreError();
+  openSheet('settings-sheet');
+}
+
+/* ============================ Open in Chrome (§1) ============================ */
+
+// Convert an http/https URL into the Chrome custom-scheme equivalent. Path,
+// query and fragment ride along via the slice+concat. Returns null for
+// anything that is not http/https.
+function chromeSchemeUrl(url) {
+  if (url.startsWith('https://')) return 'googlechromes://' + url.slice(8);
+  if (url.startsWith('http://')) return 'googlechrome://' + url.slice(7);
+  return null;
+}
+
+let chromeFallbackTimer = null;
+let chromeFallbackVisHandler = null;
+
+function cancelChromeFallback() {
+  if (chromeFallbackTimer) { clearTimeout(chromeFallbackTimer); chromeFallbackTimer = null; }
+  if (chromeFallbackVisHandler) {
+    document.removeEventListener('visibilitychange', chromeFallbackVisHandler);
+    chromeFallbackVisHandler = null;
+  }
+}
+
+// After navigating to the Chrome scheme, wait ~1.6s. If the app never went to
+// the background (Chrome opening fires visibilitychange, which cancels us),
+// Chrome is presumably not installed: surface a sticky toast to open here.
+// Listener is removed on both the fired and the cancelled path.
+function armChromeFallback(url) {
+  cancelChromeFallback();
+  chromeFallbackVisHandler = () => { if (document.visibilityState === 'hidden') cancelChromeFallback(); };
+  document.addEventListener('visibilitychange', chromeFallbackVisHandler);
+  chromeFallbackTimer = setTimeout(() => {
+    document.removeEventListener('visibilitychange', chromeFallbackVisHandler);
+    chromeFallbackVisHandler = null;
+    chromeFallbackTimer = null;
+    toast("Couldn't open Chrome. Is it installed?", {
+      duration: 0,
+      actionLabel: 'Open here',
+      action: () => window.open(url, '_blank', 'noopener'),
+    });
+  }, 1600);
+}
+
+// Route a URL through the Chrome app via its custom scheme, arming the
+// not-installed fallback. location.href is the primitive (works from a
+// standalone PWA where window.open is unreliable). Anchor hrefs are never
+// touched. Returns false without acting when the URL has no http/https scheme.
+function openViaChromeScheme(url) {
+  const scheme = chromeSchemeUrl(url);
+  if (!scheme) return false;
+  armChromeFallback(url);
+  location.href = scheme;
+  return true;
+}
+
+function syncChromeToggle() {
+  dom['settings-chrome-toggle'].checked = settings.openInChrome;
+  dom['settings-chrome-note'].hidden = !settings.openInChrome;
+}
+
+/* ============================ Backup & restore (§2) ============================ */
+
+// Assemble the backup JSON from current in-memory state + settings. Usage
+// records are passed in (fetched from storage by the caller before any share
+// gesture is spent). Accounts and bookmarks are copied verbatim.
+function buildBackupPayload(usageRecords) {
+  return {
+    app: 'bookmark-launcher',
+    formatVersion: 1,
+    exportedAt: nowSec(),
+    accounts: [...state.accounts.values()].map((a) => ({ ...a })),
+    bookmarks: state.bookmarks.map((b) => ({ ...b })),
+    usage: (usageRecords || []).map((u) => ({ key: u.key, count: u.count, lastAt: u.lastAt })),
+    settings: {
+      theme: settings.theme,
+      openInChrome: settings.openInChrome,
+      lastAccount: settings.lastAccount,
+      helpSeen: settings.helpSeen,
+    },
+  };
+}
+
+function anchorDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+function completeBackup() {
+  saveSettings({ lastBackupAt: nowSec() });
+  renderBackupStatus();
+}
+
+async function onBackupSave() {
+  let usageRecords = [];
+  try { usageRecords = await storage.getAllUsage(); } catch { usageRecords = []; }
+  const payload = buildBackupPayload(usageRecords);
+  const json = JSON.stringify(payload, null, 2);
+  const filename = `bookmark-launcher-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  const blob = new Blob([json], { type: 'application/json' });
+
+  if (IS_IOS && typeof navigator.canShare === 'function') {
+    const file = new File([blob], filename, { type: 'application/json' });
+    if (navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file] });
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;   // user cancelled: no timestamp
+        anchorDownload(blob, filename);                 // other share error: fall back
+      }
+      completeBackup();
+      return;
+    }
+  }
+  anchorDownload(blob, filename);
+  completeBackup();
+}
+
+function showRestoreError() {
+  dom['settings-restore-error'].hidden = false;
+  dom['settings-restore-error'].textContent = "That doesn't look like a Bookmark Launcher backup file.";
+}
+
+function hideRestoreError() {
+  dom['settings-restore-error'].hidden = true;
+  dom['settings-restore-error'].textContent = '';
+}
+
+// Validate + sanitize a parsed backup object per §2. Returns null on a
+// structural failure (surfaced as the single friendly error); otherwise returns
+// cleaned { accounts, bookmarks, usage } ready for storage.replaceAll.
+// Record-level problems drop/coerce the offending record, never the whole file.
+function validateBackup(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  if (data.formatVersion !== 1) return null;
+  if (!Array.isArray(data.accounts) || !Array.isArray(data.bookmarks)) return null;
+
+  const now = nowSec();
+
+  const accountsById = new Map(); // dup ids: keep first
+  for (const raw of data.accounts) {
+    if (!raw || typeof raw !== 'object') continue;
+    if (typeof raw.id !== 'string' || raw.id === '') continue;
+    if (typeof raw.label !== 'string' || raw.label === '') continue;
+    if (raw.kind !== 'import' && raw.kind !== 'manual') continue;
+    if (accountsById.has(raw.id)) continue;
+    const acc = {
+      id: raw.id,
+      label: raw.label,
+      kind: raw.kind,
+      createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : now,
+      updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : now,
+    };
+    if (typeof raw.fileName === 'string') acc.fileName = raw.fileName;
+    accountsById.set(acc.id, acc);
+  }
+
+  const bookmarksById = new Map(); // dup ids: keep first
+  data.bookmarks.forEach((raw, index) => {
+    if (!raw || typeof raw !== 'object') return;
+    if (typeof raw.id !== 'string' || raw.id === '') return;
+    if (bookmarksById.has(raw.id)) return;
+    if (typeof raw.accountId !== 'string' || !accountsById.has(raw.accountId)) return;
+    if (typeof raw.url !== 'string') return;
+    let u;
+    try { u = new URL(raw.url); } catch { return; }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
+    const domain = domainOf(u);
+    const path = Array.isArray(raw.path)
+      ? raw.path.filter((seg) => typeof seg === 'string' && seg !== '')
+      : [];
+    const bm = {
+      id: raw.id,
+      accountId: raw.accountId,
+      title: (typeof raw.title === 'string' && raw.title.trim() !== '') ? raw.title : domain,
+      url: u.href,
+      domain,
+      path,
+      icon: (typeof raw.icon === 'string' && raw.icon.startsWith('data:image/')) ? raw.icon : null,
+      addDate: typeof raw.addDate === 'number' ? raw.addDate : null,
+      order: typeof raw.order === 'number' ? raw.order : index,
+    };
+    if (Number.isInteger(raw.hueOverride) && raw.hueOverride >= 0 && raw.hueOverride <= 359) {
+      bm.hueOverride = raw.hueOverride;
+    }
+    bookmarksById.set(bm.id, bm);
+  });
+
+  const usage = [];
+  if (Array.isArray(data.usage)) {
+    for (const raw of data.usage) {
+      if (!raw || typeof raw !== 'object') continue;
+      if (typeof raw.key !== 'string' || raw.key === '') continue;
+      if (!Number.isInteger(raw.count) || raw.count <= 0) continue;
+      if (typeof raw.lastAt !== 'number') continue;
+      usage.push({ key: raw.key, count: raw.count, lastAt: raw.lastAt });
+    }
+  }
+
+  return { accounts: [...accountsById.values()], bookmarks: [...bookmarksById.values()], usage };
+}
+
+async function onRestoreFile(file) {
+  hideRestoreError();
+  let data;
+  try {
+    const text = await file.text();
+    data = JSON.parse(text);
+  } catch {
+    showRestoreError();
+    return;
+  }
+  const clean = validateBackup(data);
+  if (!clean) { showRestoreError(); return; }
+
+  const when = (typeof data.exportedAt === 'number') ? data.exportedAt : nowSec();
+  const dateStr = new Date(when * 1000).toLocaleDateString();
+  const nAcc = clean.accounts.length;
+  const mBm = clean.bookmarks.length;
+  const ok = await confirmDialog({
+    title: 'Restore backup',
+    message: `Replace everything on this phone with this backup from ${dateStr}? (${countLabel(nAcc, 'account')}, ${countLabel(mBm, 'bookmark')}.) This can't be undone.`,
+    confirmLabel: 'Replace',
+  });
+  if (!ok) return;
+
+  try {
+    await storage.replaceAll(clean.accounts, clean.bookmarks, clean.usage);
+  } catch {
+    // Atomic: nothing committed, in-memory state untouched.
+    toast("Couldn't restore. Nothing was changed.");
+    return;
+  }
+
+  // Rebuild in-memory state from the restored data.
+  state.accounts = new Map(clean.accounts.map((a) => [a.id, a]));
+  state.bookmarks = clean.bookmarks;
+  rebuildIndexes();
+  // §6: rebuild the usage map from the restored records (URL-keyed).
+  state.usage = new Map(clean.usage.map((u) => [u.key, { count: u.count, lastAt: u.lastAt }]));
+
+  // Apply settings from the backup; keep device-local helpSeen + lastBackupAt.
+  const bk = (data.settings && typeof data.settings === 'object') ? data.settings : {};
+  const theme = (bk.theme === 'light' || bk.theme === 'dark') ? bk.theme : 'system';
+  const openInChrome = bk.openInChrome === true;
+  let lastAccount = bk.lastAccount;
+  if (typeof lastAccount !== 'string' || (lastAccount !== 'all' && !state.accounts.has(lastAccount))) {
+    lastAccount = 'all';
+  }
+  saveSettings({ theme, openInChrome, lastAccount });
+  applyTheme();
+  syncThemeChoice();
+  syncChromeToggle();
+
+  // Reset the view to the home root.
+  state.view.screen = 'home';
+  state.view.accountFilter = lastAccount;
+  state.view.folderPath = [];
+  state.view.query = '';
+  state.view.editMode = false;
+  state.firstRun = state.accounts.size === 0;
+  syncNav();
+  render();
+  toast(`Backup restored — ${countLabel(mBm, 'bookmark')}.`);
 }
 
 /* ============================ Indexes ============================ */
@@ -299,6 +667,53 @@ function accountsSorted() {
   return accs;
 }
 
+/* ============================ Usage / frequently-used (§6) ============================ */
+
+// Record one tap on a bookmark: bump the in-memory usage map (keyed by the exact
+// URL, so counts survive re-import / rename / cross-account dupes) and persist
+// fire-and-forget. Taps in edit mode never count, which also covers the
+// action-sheet Open item reached from a long-press in edit mode.
+function recordTap(bm) {
+  if (state.view.editMode) return;
+  if (!bm || typeof bm.url !== 'string' || bm.url === '') return;
+  const prev = state.usage.get(bm.url);
+  const count = (prev ? prev.count : 0) + 1;
+  const lastAt = nowSec();
+  state.usage.set(bm.url, { count, lastAt });
+  storage.putUsage({ key: bm.url, count, lastAt }).catch(() => { /* fire-and-forget */ });
+}
+
+// Boot-time cleanup: drop usage rows whose URL matches no current bookmark.
+// Runs AFTER indexes are built; the delete is fire-and-forget.
+function pruneOrphanUsage() {
+  if (!(state.usage instanceof Map) || state.usage.size === 0) return;
+  const urls = new Set();
+  for (const b of state.bookmarks) urls.add(b.url);
+  const orphans = [];
+  for (const key of state.usage.keys()) if (!urls.has(key)) orphans.push(key);
+  if (orphans.length === 0) return;
+  for (const key of orphans) state.usage.delete(key);
+  storage.deleteUsageKeys(orphans).catch(() => { /* fire-and-forget */ });
+}
+
+// Candidates for the Frequently-used row: bookmarks in the active working set
+// (respecting the account chip) whose URL has count>=2. First match wins on
+// cross-account same-URL dupes; ranked count desc then lastAt desc.
+function frequentCandidates() {
+  const work = workingSet(state.view.accountFilter);
+  const seen = new Set();
+  const out = [];
+  for (const b of work) {
+    if (seen.has(b.url)) continue;
+    const u = state.usage.get(b.url);
+    if (!u || u.count < 2) continue;
+    seen.add(b.url);
+    out.push({ bm: b, count: u.count, lastAt: u.lastAt });
+  }
+  out.sort((a, b) => (b.count !== a.count ? b.count - a.count : b.lastAt - a.lastAt));
+  return out;
+}
+
 /* ============================ Rendering ============================ */
 
 let renderScheduled = false;
@@ -309,6 +724,9 @@ function scheduleRender() {
 }
 
 function render() {
+  // §5: while a drag is live the DOM is authoritative (source li relocated in
+  // place); suppress rebuilds so replaceChildren can't yank the captured node.
+  if (dragSession) { dragDirty = true; return; }
   const body = document.body;
   body.dataset.screen = state.view.screen;
   body.dataset.edit = state.view.editMode ? 'on' : 'off';
@@ -316,6 +734,7 @@ function render() {
   dom.launcher.classList.toggle('is-editing', state.view.editMode);
 
   renderChips();
+  renderFrequent();
 
   const searching = state.view.query.trim() !== '';
   const inFolder = state.view.folderPath.length > 0;
@@ -380,6 +799,9 @@ function makeChip(id, label) {
 
 /* --- Keyed tile pool --- */
 const tilePool = new Map(); // key -> li
+// §6: SEPARATE pool for the Frequently-used row (keyed 'q:'+id) — never shared
+// with tilePool so the same bookmark can appear in both the row and the grid.
+const freqPool = new Map(); // key -> li
 
 function renderGrid(cells) {
   const frag = document.createDocumentFragment();
@@ -402,8 +824,50 @@ function renderGrid(cells) {
   for (const k of [...tilePool.keys()]) if (!used.has(k)) tilePool.delete(k);
 }
 
+// §6: render the Frequently-used row. Shown only at a folder root, with no
+// active search, outside edit mode, and only when at least 3 bookmarks in the
+// active working set qualify (count>=2). Capped at 8, ranked by frequentCandidates.
+function renderFrequent() {
+  const row = dom['frequent-row'];
+  const eligible = state.view.folderPath.length === 0
+    && state.view.query === ''
+    && !state.view.editMode;
+  if (!eligible) { row.hidden = true; return; }
+
+  const cands = frequentCandidates();
+  if (cands.length < 3) { row.hidden = true; return; }
+
+  const top = cands.slice(0, 8);
+  const frag = document.createDocumentFragment();
+  const used = new Set();
+  for (const c of top) {
+    const key = 'q:' + c.bm.id;
+    used.add(key);
+    let li = freqPool.get(key);
+    if (!li) {
+      li = buildFreqTile(c.bm);
+      freqPool.set(key, li);
+    } else {
+      populateBookmarkTile(li, c.bm);
+    }
+    frag.appendChild(li);
+  }
+  dom['frequent-list'].replaceChildren(frag);
+  for (const k of [...freqPool.keys()]) if (!used.has(k)) freqPool.delete(k);
+  row.hidden = false;
+}
+
+function buildFreqTile(bm) {
+  const li = dom['tpl-tile-link'].content.firstElementChild.cloneNode(true);
+  li.dataset.id = bm.id;
+  li.dataset.kind = 'link';
+  li.dataset.key = 'q:' + bm.id;
+  populateBookmarkTile(li, bm);
+  return li;
+}
+
 function bookmarkSig(bm) {
-  return `${bm.url}${SEP}${bm.title}${SEP}${bm.domain}${SEP}${bm.icon ? 1 : 0}`;
+  return `${bm.url}${SEP}${bm.title}${SEP}${bm.domain}${SEP}${bm.icon ? 1 : 0}${SEP}${bm.hueOverride ?? ''}`;
 }
 
 function buildBookmarkTile(bm) {
@@ -423,9 +887,11 @@ function populateBookmarkTile(li, bm) {
   const a = li.querySelector('a.tile');
   a.href = bm.url;
   const info = letterInfo(bm.domain || bm.title);
+  // §7: explicit hueOverride wins over the derived hue.
+  const hue = Number.isInteger(bm.hueOverride) ? bm.hueOverride : info.hue;
   const letter = li.querySelector('.tile__letter');
   letter.textContent = info.letter;
-  letter.style.setProperty('--tile-hue', String(info.hue));
+  letter.style.setProperty('--tile-hue', String(hue));
   li.querySelector('.tile__label').textContent = bm.title;
   // Favicon chain reset.
   const img = li.querySelector('.tile__favicon');
@@ -455,8 +921,14 @@ function buildFolderTile(folder) {
   return li;
 }
 
+function previewHue(p) {
+  // Same precedence as bookmark tiles: explicit override, else derived.
+  return Number.isInteger(p.hueOverride) ? p.hueOverride : (djb2((p.domain || p.title || '').toLowerCase()) % 360);
+}
+
 function populateFolderTile(li, folder) {
-  const previewIds = folder.previewBookmarks.map((p) => p.id).join(',');
+  // §7: preview hues join the sig so override edits repaint the mini-grid.
+  const previewIds = folder.previewBookmarks.map((p) => `${p.id}:${previewHue(p)}`).join(',');
   const sig = `${folder.name}${SEP}${folder.count}${SEP}${previewIds}`;
   if (li.dataset.sig === sig) return;
   li.dataset.sig = sig;
@@ -470,8 +942,7 @@ function populateFolderTile(li, folder) {
     const p = folder.previewBookmarks[i];
     if (p) {
       cell.classList.remove('folder-mini__cell--empty');
-      const hue = djb2((p.domain || p.title || '').toLowerCase()) % 360;
-      cell.style.backgroundColor = `hsl(${hue} 55% 46%)`;
+      cell.style.backgroundColor = `hsl(${previewHue(p)} 55% 46%)`;
       cell.src = p.icon || BLANK_IMG;
     } else {
       cell.classList.add('folder-mini__cell--empty');
@@ -502,6 +973,9 @@ function initHistory() {
 }
 
 function onPopState(e) {
+  // §5: abort any in-flight drag BEFORE applying the popped view (the drag never
+  // pushed history, so a back gesture must cancel it cleanly first).
+  abortDrag();
   if (!e.state || !e.state.bl) return;
   const s = e.state;
   state.view.screen = s.view.screen;
@@ -658,14 +1132,59 @@ function onGridClick(e) {
   if (state.view.editMode) {
     e.preventDefault();
     openActionSheet(li);
+    return;
   }
+  // Not editing: honor Open-in-Chrome (§1) and record the tap (§6). Never
+  // mutates the anchor href, so long-press / copy / open-in-new-tab keep
+  // working on the untouched link.
+  const bm = state.byId.get(li.dataset.id);
+  if (!bm) return;
+  if (settings.openInChrome && IS_IOS) {
+    recordTap(bm);
+    if (openViaChromeScheme(bm.url)) { e.preventDefault(); return; }
+    return; // non-http URL (helper no-op): fall through to native anchor nav
+  }
+  // §6: record before the native anchor navigation (delegation runs before the
+  // browser follows the target=_blank link; this page persists).
+  recordTap(bm);
   // else: allow native anchor navigation (target=_blank)
 }
 
+// §5: drag-to-rearrange arms only in edit mode, on a single-account view, with
+// no active search. Everywhere else (normal mode, All view, search) the pointer
+// gesture stays byte-for-byte the classic 500ms long-press.
+function dragReorderAllowed() {
+  return state.view.editMode
+    && state.view.accountFilter !== 'all'
+    && state.view.query === '';
+}
+
 function onGridPointerDown(e) {
+  // A fresh gesture always starts with the click-swallow flags cleared, so a
+  // stale long-press/drag from a prior gesture can never eat this gesture's click.
+  suppressNextClick = false;
+  lpFired = false;
   const tile = e.target.closest('[data-kind]');
   if (!tile) return;
   if (e.target.closest('.tile__more')) return;
+
+  // §5: on a draggable link tile, arm the pending-drag path INSTEAD of the
+  // long-press timer. setPointerCapture keeps move/up/cancel flowing to the grid
+  // even after the source li is relocated (capture survives insertBefore).
+  if (dragReorderAllowed() && tile.dataset.kind === 'link') {
+    const bm = state.byId.get(tile.dataset.id);
+    if (bm) {
+      try { tile.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+      dragPending = {
+        pointerId: e.pointerId, li: tile, bm,
+        x0: e.clientX, y0: e.clientY,
+        timer: setTimeout(() => startDrag(null), 150),
+      };
+      return;
+    }
+  }
+
+  // Classic long-press (normal mode, All view, search, folder tiles).
   lpTile = tile;
   lpStart = { x: e.clientX, y: e.clientY };
   lpFired = false;
@@ -678,19 +1197,258 @@ function onGridPointerDown(e) {
 }
 
 function onGridPointerMove(e) {
+  // §5: pending -> promote to a live drag once past the 8px threshold.
+  if (dragPending && e.pointerId === dragPending.pointerId) {
+    const dx = e.clientX - dragPending.x0, dy = e.clientY - dragPending.y0;
+    if (dx * dx + dy * dy > 64) startDrag(e);
+    return;
+  }
+  // §5: live drag just records the latest pointer; the rAF loop does the work.
+  if (dragSession && e.pointerId === dragSession.pointerId) {
+    dragSession.lastX = e.clientX;
+    dragSession.lastY = e.clientY;
+    return;
+  }
+  // Classic long-press cancel on a >10px move.
   if (!lpStart) return;
   const dx = e.clientX - lpStart.x, dy = e.clientY - lpStart.y;
   if (dx * dx + dy * dy > 100) { clearTimeout(lpTimer); lpStart = null; }
 }
 
+function onGridPointerUp(e) {
+  // §5 PENDING->IDLE: released before threshold -> let the native click run the
+  // edit-mode branch (opens the action sheet), exactly like a plain tap.
+  if (dragPending && e.pointerId === dragPending.pointerId) { clearDragPending(); return; }
+  // §5 DRAGGING->COMMIT.
+  if (dragSession && e.pointerId === dragSession.pointerId) { commitDrag(); return; }
+  clearLongPress();
+}
+
+function onGridPointerCancel(e) {
+  if (dragPending && e.pointerId === dragPending.pointerId) { clearDragPending(); return; }
+  if (dragSession && e.pointerId === dragSession.pointerId) { abortDrag(); return; }
+  clearLongPress();
+}
+
 function clearLongPress() { clearTimeout(lpTimer); lpStart = null; }
 
 function onGridClickCapture(e) {
+  // Swallow the click synthesized after a long-press OR after a committed/aborted
+  // drag, so neither re-opens the action sheet.
   if (lpFired) {
     e.preventDefault();
     e.stopPropagation();
     lpFired = false;
+  } else if (suppressNextClick) {
+    e.preventDefault();
+    e.stopPropagation();
+    suppressNextClick = false;
   }
+}
+
+/* ============================ Drag-to-rearrange (§5) ============================ */
+
+// Clear an armed-but-not-started pending drag (early release / abort).
+function clearDragPending() {
+  if (!dragPending) return;
+  clearTimeout(dragPending.timer);
+  try { dragPending.li.releasePointerCapture(dragPending.pointerId); } catch { /* ignore */ }
+  dragPending = null;
+}
+
+// §5 PENDING->DRAGGING: build the ghost, flag the source li as a placeholder,
+// start the rAF loop. `e` is the promoting pointermove, or null when promoted by
+// the 150ms hold timer (finger still ~stationary, so grab from x0/y0).
+function startDrag(e) {
+  if (!dragPending) return;
+  const p = dragPending;
+  clearTimeout(p.timer);
+  dragPending = null;
+
+  const li = p.li;
+  const px = e ? e.clientX : p.x0;
+  const py = e ? e.clientY : p.y0;
+
+  const inner = li.querySelector('.tile') || li;
+  const rect = inner.getBoundingClientRect();
+
+  // Ghost: a fixed, cloned tile that rides the finger (lazily created per drag).
+  const ghost = document.createElement('div');
+  ghost.id = 'drag-ghost';
+  ghost.style.width = rect.width + 'px';
+  ghost.style.height = rect.height + 'px';
+  ghost.appendChild(inner.cloneNode(true));
+  document.body.appendChild(ghost);
+
+  li.classList.add('grid__item--drag-source');
+
+  dragSession = {
+    pointerId: p.pointerId, li, bm: p.bm, ghost,
+    grabDx: px - rect.left, grabDy: py - rect.top,
+    lastX: px, lastY: py,
+    headerEl: document.querySelector('.header'),
+    raf: 0,
+  };
+  dragDirty = false;
+
+  if (navigator.vibrate) { try { navigator.vibrate(10); } catch { /* ignore */ } }
+
+  positionGhost(px, py);
+  dragSession.raf = requestAnimationFrame(dragFrame);
+}
+
+function positionGhost(px, py) {
+  const s = dragSession;
+  if (!s) return;
+  const x = px - s.grabDx, y = py - s.grabDy;
+  s.ghost.style.transform = `translate3d(${x}px, ${y}px, 0) scale(1.06)`;
+}
+
+// Autoscroll velocity for the current pointer Y: proportional within 72px of the
+// header bottom (up) or the viewport bottom (down), capped at ±14px/frame.
+function autoScrollVelocity(pointerY) {
+  const MARGIN = 72, MAX = 14;
+  const headerBottom = dragSession.headerEl ? dragSession.headerEl.getBoundingClientRect().bottom : 0;
+  const topZone = headerBottom + MARGIN;
+  if (pointerY < topZone) {
+    const k = Math.min(1, (topZone - pointerY) / MARGIN);
+    return -Math.ceil(k * MAX);
+  }
+  const bottomZone = window.innerHeight - MARGIN;
+  if (pointerY > bottomZone) {
+    const k = Math.min(1, (pointerY - bottomZone) / MARGIN);
+    return Math.ceil(k * MAX);
+  }
+  return 0;
+}
+
+// One rAF tick: reposition the ghost, autoscroll if near an edge, then re-run the
+// hit-test at the last pointer position (so scrolled content re-targets too).
+function dragFrame() {
+  const s = dragSession;
+  if (!s) return;
+  positionGhost(s.lastX, s.lastY);
+  const v = autoScrollVelocity(s.lastY);
+  if (v !== 0) window.scrollBy(0, v);
+  hitTestReorder(s.lastX, s.lastY);
+  s.raf = requestAnimationFrame(dragFrame);
+}
+
+// §5 hit-test: find the link tile under the finger; relocate the source li to the
+// near side of it. Folder tiles and gaps resolve to null -> no-op, so folders
+// (which always precede links) stay first and the source never crosses them.
+function hitTestReorder(px, py) {
+  const s = dragSession;
+  if (!s) return;
+  const src = s.li;
+  const el = document.elementFromPoint(px, py);
+  if (!el) return;
+  const t = el.closest('.grid__item[data-kind="link"]');
+  if (!t || t === src || !dom.grid.contains(t)) return;
+  if (src.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING) {
+    dom.grid.insertBefore(src, t.nextSibling);
+  } else {
+    dom.grid.insertBefore(src, t);
+  }
+}
+
+// Tear down ghost + placeholder + rAF loop + pointer capture. Leaves the DOM in
+// its dragged order (caller decides whether to commit or snap back).
+function teardownDrag() {
+  const s = dragSession;
+  dragSession = null;
+  if (!s) return;
+  if (s.raf) cancelAnimationFrame(s.raf);
+  try { s.li.releasePointerCapture(s.pointerId); } catch { /* ignore */ }
+  s.li.classList.remove('grid__item--drag-source');
+  if (s.ghost && s.ghost.parentNode) s.ghost.parentNode.removeChild(s.ghost);
+}
+
+// §5 ABORT (pointercancel / popstate / tab hidden): snap the grid back to the
+// stored order, write nothing. Also disarms a pending (not-yet-started) drag.
+function abortDrag() {
+  if (dragPending) clearDragPending();
+  if (!dragSession) return;
+  teardownDrag();
+  dragDirty = false;
+  suppressNextClick = true; // a mouse drag still emits a click on release
+  scheduleRender();
+}
+
+// §5.3 COMMIT: reassign order values by stable multiset — the post-drag DOM order
+// of the folder's direct link tiles gets those same records' order values sorted
+// ascending, so the value set is unchanged and nothing outside the group churns.
+function commitDrag() {
+  const wasDirty = dragDirty;
+  teardownDrag();
+  dragDirty = false;
+  suppressNextClick = true; // swallow the release-synthesized click
+
+  const accId = state.view.accountFilter;
+  const records = [];
+  for (const li of dom.grid.querySelectorAll('.grid__item[data-kind="link"]')) {
+    const r = state.byId.get(li.dataset.id);
+    if (r) records.push(r);
+  }
+  if (records.length < 2) { if (wasDirty) scheduleRender(); return; }
+
+  const sorted = records.map((r) => r.order).slice().sort((a, b) => a - b);
+  // Defensive: duplicate order values make positional assignment ambiguous —
+  // renumber the whole direct set above the account's current max.
+  const hasDup = new Set(sorted).size !== sorted.length;
+  const base = nextOrder(accId);
+  const assigned = hasDup ? records.map((_, i) => base + i) : sorted;
+
+  const changed = [];
+  records.forEach((r, i) => {
+    if (r.order !== assigned[i]) changed.push({ ...r, order: assigned[i] });
+  });
+  if (changed.length === 0) { if (wasDirty) scheduleRender(); return; }
+
+  storage.bulkPutBookmarks(changed).then(() => {
+    for (const nr of changed) {
+      const idx = state.bookmarks.findIndex((b) => b.id === nr.id);
+      if (idx >= 0) state.bookmarks[idx] = nr;
+    }
+    rebuildIndexes();
+    render();
+  }).catch(() => {
+    toast("Couldn't save the new order.");
+    render(); // snap back to the stored order
+  });
+}
+
+// Delegated favicon load/error handlers, shared by the grid and the
+// Frequently-used row (both hold .tile__favicon images).
+function onTileFaviconLoad(e) {
+  const img = e.target;
+  if (!(img instanceof HTMLImageElement) || !img.classList.contains('tile__favicon')) return;
+  const tile = img.closest('.tile');
+  if (tile) tile.classList.add('tile--hasicon');
+}
+
+function onTileFaviconError(e) {
+  const img = e.target;
+  if (!(img instanceof HTMLImageElement) || !img.classList.contains('tile__favicon')) return;
+  advanceFavicon(img);
+}
+
+// §6: Frequently-used row click — exactly the grid link logic (Chrome
+// interception + recordTap). The row is hidden in edit mode; the guard is kept
+// for consistency. No long-press / action sheet is wired for these tiles.
+function onFrequentClick(e) {
+  const li = e.target.closest('[data-kind]');
+  if (!li) return;
+  if (state.view.editMode) { e.preventDefault(); return; }
+  const bm = state.byId.get(li.dataset.id);
+  if (!bm) return;
+  if (settings.openInChrome && IS_IOS) {
+    recordTap(bm);
+    if (openViaChromeScheme(bm.url)) { e.preventDefault(); return; }
+    return;
+  }
+  recordTap(bm);
+  // else: allow native anchor navigation (target=_blank)
 }
 
 /* ============================ Action sheet ============================ */
@@ -703,9 +1461,10 @@ function openActionSheet(tileEl) {
     actionCtx = { kind: 'link', bookmark: bm };
     dom['action-sheet-title'].textContent = bm.title;
     dom['action-open'].hidden = false;
-    dom['action-open'].textContent = 'Open in new tab';
+    dom['action-open'].textContent = (settings.openInChrome && IS_IOS) ? 'Open in Chrome' : 'Open in new tab';
     dom['action-edit'].hidden = false;
     dom['action-edit'].textContent = 'Edit';
+    dom['action-move'].hidden = true;          // §4.2: Move is folder-only
     dom['action-delete'].hidden = false;
     dom['action-delete'].textContent = 'Delete';
   } else {
@@ -718,6 +1477,7 @@ function openActionSheet(tileEl) {
     const single = state.view.accountFilter !== 'all';
     dom['action-edit'].hidden = !single;
     dom['action-edit'].textContent = 'Edit';
+    dom['action-move'].hidden = !single;       // §4.2: single-account folders only
     dom['action-delete'].hidden = !single;
     dom['action-delete'].textContent = 'Delete';
   }
@@ -727,7 +1487,12 @@ function openActionSheet(tileEl) {
 function onActionOpen() {
   if (!actionCtx) return;
   if (actionCtx.kind === 'link') {
-    window.open(actionCtx.bookmark.url, '_blank', 'noopener');
+    recordTap(actionCtx.bookmark); // §6 (no-op in edit mode)
+    if (settings.openInChrome && IS_IOS) {
+      openViaChromeScheme(actionCtx.bookmark.url);
+    } else {
+      window.open(actionCtx.bookmark.url, '_blank', 'noopener');
+    }
     closeSheet();
   } else {
     // Close sheet and descend in-place (replace the sheet's history entry).
@@ -748,6 +1513,13 @@ function onActionEdit() {
     const acc = state.accounts.get(state.view.accountFilter);
     openBookmarkModal({ kind: 'folder', path: actionCtx.path, name: actionCtx.name, account: acc });
   }
+}
+
+function onActionMove() {
+  if (!actionCtx || actionCtx.kind !== 'folder') return;
+  const acc = state.accounts.get(state.view.accountFilter);
+  if (!acc) return;
+  openBookmarkModal({ kind: 'folder-move', path: actionCtx.path, name: actionCtx.name, account: acc });
 }
 
 async function onActionDelete() {
@@ -964,18 +1736,28 @@ function openBookmarkModal(opts) {
   dom['bookmark-newfolder'].hidden = true;
   dom['bookmark-newfolder-input'].value = '';
   dom['bookmark-form'].noValidate = true;
+  // Defaults: title shown, colour hidden. Overridden per-kind below.
+  dom.titleWrap.hidden = false;
+  dom['bookmark-color-field'].hidden = true;
 
   if (kind === 'link-add' || kind === 'link-edit') {
     dom['bookmark-modal-title'].textContent = kind === 'link-add' ? 'Add bookmark' : 'Edit bookmark';
     dom.urlWrap.hidden = false;
     dom.accountWrap.hidden = false;
     dom.folderWrap.hidden = false;
+    dom['bookmark-color-field'].hidden = false;
     const bm = opts.bookmark || null;
     populateAccountSelect(bm ? bm.accountId : null);
     populateFolderSelect(dom['bookmark-account-select'].value, bm ? bm.path : (opts.folderPath || []));
+    populateNewFolderParent(dom['bookmark-account-select'].value);
     dom['bookmark-id-input'].value = bm ? bm.id : '';
-    dom['bookmark-title-input'].value = bm ? bm.title : '';
-    dom['bookmark-url-input'].value = bm ? bm.url : '';
+    // §8: prefill from a share-target launch when adding.
+    dom['bookmark-title-input'].value = bm ? bm.title : (opts.prefillTitle || '');
+    dom['bookmark-url-input'].value = bm ? bm.url : (opts.prefillUrl || '');
+    // §7: paint swatches; select the stored override, else Auto.
+    const selHue = (bm && Number.isInteger(bm.hueOverride)) ? bm.hueOverride : null;
+    const autoHue = derivedTileHue(dom['bookmark-title-input'].value, dom['bookmark-url-input'].value);
+    syncColorSwatches(selHue, autoHue);
   } else if (kind === 'folder') {
     dom['bookmark-modal-title'].textContent = 'Rename folder';
     dom.urlWrap.hidden = true;
@@ -983,6 +1765,17 @@ function openBookmarkModal(opts) {
     dom.folderWrap.hidden = true;
     dom['bookmark-id-input'].value = '';
     dom['bookmark-title-input'].value = opts.name || (opts.path ? opts.path[opts.path.length - 1] : '');
+  } else if (kind === 'folder-move') {
+    // §4.2: only the destination folder select is shown.
+    dom['bookmark-modal-title'].textContent = 'Move folder';
+    dom.titleWrap.hidden = true;
+    dom.urlWrap.hidden = true;
+    dom.accountWrap.hidden = true;
+    dom.folderWrap.hidden = false;
+    dom['bookmark-id-input'].value = '';
+    const P = opts.path;
+    populateFolderSelect(opts.account.id, P.slice(0, -1), P);
+    populateNewFolderParent(opts.account.id, P);
   } else if (kind === 'account') {
     dom['bookmark-modal-title'].textContent = 'Rename account';
     dom.urlWrap.hidden = true;
@@ -992,6 +1785,11 @@ function openBookmarkModal(opts) {
     dom['bookmark-title-input'].value = opts.account.label;
   }
   openSheet('bookmark-modal');
+
+  // §8: text without a URL lands the caret on the empty URL field.
+  if (kind === 'link-add' && ('prefillUrl' in opts || 'prefillTitle' in opts) && !dom['bookmark-url-input'].value) {
+    try { dom['bookmark-url-input'].focus(); } catch { /* ignore */ }
+  }
 }
 
 function populateAccountSelect(selectedId) {
@@ -1020,14 +1818,16 @@ function populateAccountSelect(selectedId) {
   }
 }
 
-function populateFolderSelect(accountId, selectedPath) {
+function populateFolderSelect(accountId, selectedPath, excludePrefix) {
   const frag = document.createDocumentFragment();
   const top = document.createElement('option');
   top.value = '';
   top.textContent = 'Top';
   frag.appendChild(top);
   const realId = accountId === '__manual__' ? null : accountId;
-  const paths = realId ? folderPathsOf(realId) : [];
+  const all = realId ? folderPathsOf(realId) : [];
+  // §4.2: exclude the moved folder + descendants from move destinations.
+  const paths = excludePrefix ? all.filter((p) => !isPrefix(excludePrefix, p)) : all;
   for (const p of paths) {
     const o = document.createElement('option');
     o.value = JSON.stringify(p);
@@ -1051,6 +1851,75 @@ function populateFolderSelect(accountId, selectedPath) {
   dom['bookmark-newfolder'].hidden = sel.value !== '__new__';
 }
 
+// §4.1: fill the "Inside" parent picker for New-folder creation. `excludePrefix`
+// (folder-move only) drops the moved folder and its descendants. Defaults the
+// selection to the current view folder when it belongs to the chosen account.
+function populateNewFolderParent(accountId, excludePrefix) {
+  const sel = dom['bookmark-newfolder-parent'];
+  const realId = accountId === '__manual__' ? null : accountId;
+  const all = realId ? folderPathsOf(realId) : [];
+  const paths = excludePrefix ? all.filter((p) => !isPrefix(excludePrefix, p)) : all;
+  const frag = document.createDocumentFragment();
+  const top = document.createElement('option');
+  top.value = '';
+  top.textContent = 'Top';
+  frag.appendChild(top);
+  const keys = new Set();
+  for (const p of paths) {
+    const key = JSON.stringify(p);
+    keys.add(key);
+    const o = document.createElement('option');
+    o.value = key;
+    o.textContent = p.join(' / ');
+    frag.appendChild(o);
+  }
+  sel.replaceChildren(frag);
+  const vfp = state.view.folderPath;
+  const wantKey = (vfp && vfp.length) ? JSON.stringify(vfp) : '';
+  sel.value = (wantKey && keys.has(wantKey)) ? wantKey : '';
+}
+
+/* §7: tile-colour swatches (Auto + 8 fixed hues). */
+function derivedTileHue(title, urlRaw) {
+  let domain = '';
+  const raw = (urlRaw || '').trim();
+  if (raw) {
+    const v = validateUrl(raw);
+    if (v.url) domain = domainOf(v.url);
+  }
+  return letterInfo(domain || title || '').hue;
+}
+
+// Paint every swatch (Auto shows the derived hue) and mark the selection.
+// selectedHue is null for Auto, else one of the fixed hues.
+function syncColorSwatches(selectedHue, autoHue) {
+  const swatches = dom['bookmark-color-row'].querySelectorAll('.swatch');
+  for (const sw of swatches) {
+    const isAuto = sw.dataset.hue === '';
+    const h = isAuto ? autoHue : parseInt(sw.dataset.hue, 10);
+    sw.style.background = `hsl(${h} 55% 46%)`;
+    const swHue = isAuto ? null : h;
+    sw.setAttribute('aria-checked', swHue === selectedHue ? 'true' : 'false');
+  }
+}
+
+// Live-update only the Auto swatch as the title/URL fields change.
+function updateAutoSwatch() {
+  if (dom['bookmark-color-field'].hidden) return;
+  const auto = dom['bookmark-color-row'].querySelector('.swatch[data-hue=""]');
+  if (!auto) return;
+  const h = derivedTileHue(dom['bookmark-title-input'].value, dom['bookmark-url-input'].value);
+  auto.style.background = `hsl(${h} 55% 46%)`;
+}
+
+// Read the chosen hue: null (Auto) or the checked fixed hue.
+function selectedColorHue() {
+  const checked = dom['bookmark-color-row'].querySelector('.swatch[aria-checked="true"]');
+  if (!checked || checked.dataset.hue === '') return null;
+  const h = parseInt(checked.dataset.hue, 10);
+  return Number.isInteger(h) ? h : null;
+}
+
 function showBookmarkError(msg) {
   dom['bookmark-error'].hidden = false;
   dom['bookmark-error'].textContent = msg;
@@ -1072,7 +1941,11 @@ function resolveFolderPathFromSelect() {
   if (val === '__new__') {
     const seg = normSeg(dom['bookmark-newfolder-input'].value);
     if (!seg) return { error: 'Please enter a folder name.' };
-    return { path: [seg] };
+    // §4.1: nest the new folder under the chosen "Inside" parent.
+    let parentPath = [];
+    const pv = dom['bookmark-newfolder-parent'].value;
+    if (pv) { try { parentPath = JSON.parse(pv); } catch { parentPath = []; } }
+    return { path: parentPath.concat([seg]) };
   }
   if (val === '') return { path: [] };
   try { return { path: JSON.parse(val) }; }
@@ -1104,6 +1977,7 @@ async function onBookmarkSave() {
   if (kind === 'link-add') return saveLinkAdd();
   if (kind === 'link-edit') return saveLinkEdit();
   if (kind === 'folder') return saveFolderRename();
+  if (kind === 'folder-move') return saveFolderMove();
   if (kind === 'account') return saveAccountRename();
 }
 
@@ -1121,6 +1995,9 @@ async function saveLinkAdd() {
     id: uuid(), accountId, title, url: u.href, domain, path: pathRes.path,
     icon: null, addDate: nowSec(), order: nextOrder(accountId),
   };
+  // §7: attach an explicit tile hue when one is chosen (Auto omits the field).
+  const hue = selectedColorHue();
+  if (hue !== null) record.hueOverride = hue;
   try { await storage.putBookmark(record); }
   catch { showBookmarkError("Couldn't save. Please try again."); return; }
   upsertBookmarkInState(record);
@@ -1149,6 +2026,10 @@ async function saveLinkEdit() {
   updated.domain = domainOf(u);
   updated.title = dom['bookmark-title-input'].value.trim() || updated.domain;
   updated.path = pathRes.path;
+  // §7: write the chosen hue, or strip any existing override for Auto.
+  const hue = selectedColorHue();
+  if (hue !== null) updated.hueOverride = hue;
+  else delete updated.hueOverride;
   if (accountId !== orig.accountId) {
     updated.accountId = accountId;
     updated.order = nextOrder(accountId);
@@ -1183,6 +2064,51 @@ async function saveFolderRename() {
   closeSheet();
   render();
   toast('Folder renamed.');
+}
+
+async function saveFolderMove() {
+  const P = bookmarkCtx.path;
+  const acc = bookmarkCtx.account || state.accounts.get(state.view.accountFilter);
+  if (!acc || !P || !P.length) { showBookmarkError('Something went wrong.'); return; }
+  const destRes = resolveFolderPathFromSelect();
+  if (destRes.error) { showBookmarkError(destRes.error); return; }
+  const D = destRes.path;                  // destination parent path
+  const name = P[P.length - 1];
+  const newPrefix = D.concat([name]);
+  // No move: destination parent is the current parent.
+  if (pathsEqual(newPrefix, P)) { closeSheet(); return; }
+
+  const accBms = state.byAccount.get(acc.id) || [];
+  // Collision: a folder already lives at newPrefix (outside the moved subtree).
+  const collision = accBms.some((b) => !isPrefix(P, b.path) && isPrefix(newPrefix, b.path));
+  if (collision) {
+    const ok = await confirmDialog({
+      title: 'Combine folders',
+      message: `A folder named '${name}' is already there. The two folders will be combined.`,
+      confirmLabel: 'Combine',
+    });
+    if (!ok) return;
+  }
+
+  // Exact prefix rewrite for the moved folder and every descendant.
+  const updatedAll = accBms.map((b) => (
+    isPrefix(P, b.path) ? { ...b, path: newPrefix.concat(b.path.slice(P.length)) } : b
+  ));
+  const updatedAcc = { ...acc, updatedAt: nowSec() };
+  try { await storage.replaceAccountBookmarks(updatedAcc, updatedAll); }
+  catch {
+    if (state.ui.sheet === 'bookmark-modal') showBookmarkError("Couldn't save. Please try again.");
+    else toast("Couldn't save. Please try again.");
+    return;
+  }
+  state.accounts.set(acc.id, updatedAcc);
+  replaceAccountBookmarksInState(acc.id, updatedAll);
+  if (isPrefix(P, state.view.folderPath)) {
+    state.view.folderPath = newPrefix.concat(state.view.folderPath.slice(P.length));
+  }
+  closeSheet();
+  render();
+  toast('Folder moved.');
 }
 
 async function saveAccountRename() {
@@ -1297,23 +2223,25 @@ function registerServiceWorker() {
 
 function wireEvents() {
   // Grid: delegated favicon load/error (capture), click, long-press.
-  dom.grid.addEventListener('load', (e) => {
-    const img = e.target;
-    if (!(img instanceof HTMLImageElement) || !img.classList.contains('tile__favicon')) return;
-    const tile = img.closest('.tile');
-    if (tile) tile.classList.add('tile--hasicon');
-  }, true);
-  dom.grid.addEventListener('error', (e) => {
-    const img = e.target;
-    if (!(img instanceof HTMLImageElement) || !img.classList.contains('tile__favicon')) return;
-    advanceFavicon(img);
-  }, true);
+  dom.grid.addEventListener('load', onTileFaviconLoad, true);
+  dom.grid.addEventListener('error', onTileFaviconError, true);
   dom.grid.addEventListener('click', onGridClickCapture, true);
   dom.grid.addEventListener('click', onGridClick);
   dom.grid.addEventListener('pointerdown', onGridPointerDown);
   dom.grid.addEventListener('pointermove', onGridPointerMove);
-  dom.grid.addEventListener('pointerup', clearLongPress);
-  dom.grid.addEventListener('pointercancel', clearLongPress);
+  dom.grid.addEventListener('pointerup', onGridPointerUp);
+  dom.grid.addEventListener('pointercancel', onGridPointerCancel);
+
+  // §5: a backgrounded tab aborts any live drag (teardown, no writes, snap back).
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') abortDrag();
+  });
+
+  // §6: Frequently-used row shares the favicon fallback chain, but only a thin
+  // click handler (no long-press / action sheet — no pointer handlers attached).
+  dom['frequent-list'].addEventListener('load', onTileFaviconLoad, true);
+  dom['frequent-list'].addEventListener('error', onTileFaviconError, true);
+  dom['frequent-list'].addEventListener('click', onFrequentClick);
 
   // Chips.
   dom['account-chips'].addEventListener('click', (e) => {
@@ -1351,6 +2279,7 @@ function wireEvents() {
     setEditMode(!state.view.editMode);
   });
   dom['menu-manage-accounts'].addEventListener('click', () => { hidePopover(); openAccountsScreen(); });
+  dom['menu-settings'].addEventListener('click', () => { hidePopover(); openSettingsSheet(); });
   dom['menu-help'].addEventListener('click', () => { hidePopover(); openHelpScreen(); });
 
   // Import sheet.
@@ -1378,15 +2307,28 @@ function wireEvents() {
   dom['bookmark-cancel'].addEventListener('click', () => closeSheet());
   dom['bookmark-form'].addEventListener('submit', (e) => { e.preventDefault(); onBookmarkSave(); });
   dom['bookmark-account-select'].addEventListener('change', () => {
-    populateFolderSelect(dom['bookmark-account-select'].value, []);
+    const accId = dom['bookmark-account-select'].value;
+    populateFolderSelect(accId, []);
+    populateNewFolderParent(accId);
   });
   dom['bookmark-folder-select'].addEventListener('change', () => {
     dom['bookmark-newfolder'].hidden = dom['bookmark-folder-select'].value !== '__new__';
+  });
+  // §7: keep the Auto swatch showing the live derived hue; pick a fixed hue.
+  dom['bookmark-title-input'].addEventListener('input', updateAutoSwatch);
+  dom['bookmark-url-input'].addEventListener('input', updateAutoSwatch);
+  dom['bookmark-color-row'].addEventListener('click', (e) => {
+    const sw = e.target.closest('.swatch');
+    if (!sw) return;
+    for (const s of dom['bookmark-color-row'].querySelectorAll('.swatch')) {
+      s.setAttribute('aria-checked', s === sw ? 'true' : 'false');
+    }
   });
 
   // Action sheet.
   dom['action-open'].addEventListener('click', onActionOpen);
   dom['action-edit'].addEventListener('click', onActionEdit);
+  dom['action-move'].addEventListener('click', onActionMove);
   dom['action-delete'].addEventListener('click', onActionDelete);
   dom['action-cancel'].addEventListener('click', () => closeSheet());
 
@@ -1410,8 +2352,44 @@ function wireEvents() {
   // Help.
   dom['help-close'].addEventListener('click', () => closeSheet());
 
+  // Settings sheet.
+  dom['settings-close'].addEventListener('click', () => closeSheet());
+  dom['theme-choice'].addEventListener('click', (e) => {
+    const btn = e.target.closest('.segmented__btn');
+    if (!btn) return;
+    const val = btn.dataset.themeValue;
+    if (val !== 'system' && val !== 'light' && val !== 'dark') return;
+    saveSettings({ theme: val });
+    applyTheme();
+    syncThemeChoice();
+  });
+
+  // Open-in-Chrome toggle + test (§1).
+  dom['settings-chrome-toggle'].addEventListener('change', () => {
+    const on = dom['settings-chrome-toggle'].checked;
+    saveSettings({ openInChrome: on });
+    dom['settings-chrome-note'].hidden = !on;
+  });
+  dom['settings-chrome-test'].addEventListener('click', () => {
+    openViaChromeScheme('https://www.google.com/');
+  });
+
+  // Backup & restore (§2).
+  dom['settings-backup-btn'].addEventListener('click', () => { onBackupSave(); });
+  dom['settings-restore-btn'].addEventListener('click', () => {
+    hideRestoreError();
+    dom['settings-restore-input'].click();
+  });
+  dom['settings-restore-input'].addEventListener('change', () => {
+    const input = dom['settings-restore-input'];
+    const f = input.files && input.files[0];
+    if (!f) return;
+    // Clear the picker after handling so re-picking the same file refires.
+    onRestoreFile(f).finally(() => { input.value = ''; });
+  });
+
   // Esc/cancel on every dialog routes through history so DOM + state stay in sync.
-  for (const id of ['import-sheet', 'bookmark-modal', 'action-sheet', 'confirm-dialog', 'manage-accounts', 'help-screen']) {
+  for (const id of ['import-sheet', 'bookmark-modal', 'action-sheet', 'confirm-dialog', 'manage-accounts', 'settings-sheet', 'help-screen']) {
     dom[id].addEventListener('cancel', (e) => { e.preventDefault(); closeSheet(); });
   }
 }
@@ -1435,17 +2413,31 @@ function advanceFavicon(img) {
 async function boot() {
   cacheDom();
   loadSettings();
+  applyTheme();
   wireEvents();
+
+  // Reveal the Open-in-Chrome control only on iOS (§1). Non-iOS keeps it hidden
+  // AND the interception guards on IS_IOS, so a restored openInChrome is inert.
+  if (IS_IOS) dom['settings-chrome-row'].hidden = false;
+
+  storage.setVersionChangeHandler(() => {
+    toast('Updated in another tab — tap to reload', { duration: 0, action: () => location.reload() });
+  });
 
   try {
     await storage.init();
-    const [accounts, bookmarks] = await Promise.all([storage.getAllAccounts(), storage.getAllBookmarks()]);
+    const [accounts, bookmarks, usage] = await Promise.all([
+      storage.getAllAccounts(), storage.getAllBookmarks(), storage.getAllUsage(),
+    ]);
     state.accounts = new Map(accounts.map((a) => [a.id, a]));
     state.bookmarks = bookmarks;
+    state.usage = new Map(usage.map((u) => [u.key, { count: u.count, lastAt: u.lastAt }]));
     rebuildIndexes();
+    pruneOrphanUsage(); // §6: after indexes, drop usage rows with no matching URL
   } catch {
     state.accounts = new Map();
     state.bookmarks = [];
+    state.usage = new Map();
     rebuildIndexes();
     toast('Your browser is blocking local storage');
   }
@@ -1457,8 +2449,26 @@ async function boot() {
     state.view.accountFilter = 'all';
   }
 
+  // §8: parse a share-target launch BEFORE initHistory stamps its base entry,
+  // so the shared params never resurface via back/forward.
+  let sharePrefill = null;
+  const sp = new URLSearchParams(location.search);
+  const spUrl = sp.get('url');
+  const spText = sp.get('text');
+  const spTitle = sp.get('title');
+  if (spUrl !== null || spText !== null || spTitle !== null) {
+    sharePrefill = {
+      prefillTitle: spTitle || '',
+      prefillUrl: spUrl || firstHttpUrlIn(spText),
+    };
+    history.replaceState(null, '', location.pathname);
+  }
+
   initHistory();
   render();
+  if (sharePrefill) {
+    openBookmarkModal({ kind: 'link-add', prefillTitle: sharePrefill.prefillTitle, prefillUrl: sharePrefill.prefillUrl });
+  }
   registerServiceWorker();
   state.ready = true;
 }

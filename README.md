@@ -19,6 +19,8 @@ Chrome on your phone can't export bookmarks, but it syncs them to Chrome on your
 
 If you use more than one Google account or Chrome profile, repeat these steps for each one so you get a separate file for each.
 
+This also works with bookmark files exported from Safari, Firefox, or Edge — the steps are the same, just use that browser's Export Bookmarks option.
+
 ## 3. Get the files onto your phone
 
 Now move the file (or files) you just saved onto your phone. The easiest ways are:
@@ -58,6 +60,10 @@ Phones don't let apps read Chrome's saved passwords, and that's a good thing. If
 - **Press and hold a tile** to rename or delete it.
 - **A letter tile instead of a site's logo is normal.** Some sites just don't hand over an icon, so you get a colored letter instead.
 - **On iPhone:** if your bookmarks ever seem to vanish, import the file again. It also helps to use the version you added to your Home Screen rather than a fresh Safari tab.
+- **On Android, add a page straight from Chrome.** Open the page in Chrome, tap **Share**, then tap **Bookmarks** to send it right into the app. If you don't see Bookmarks in the share list yet, give it up to a day — Android can be slow to notice a newly added app there. Removing the app's Home Screen icon and adding it again usually gets it to show up sooner.
+- **Make it yours in Settings.** Open the menu (⋮) and tap **Settings** to switch the appearance between **System**, **Light**, and **Dark**. On iPhone you'll also find **Open links in Chrome**, which opens your tiles in the Chrome app instead of Safari.
+- **Keep a backup.** Settings has **Save backup** and **Restore backup**. Saving a backup after a big import is a good habit — it's a single file you can keep in Files, AirDrop, or email to yourself, and restoring it puts everything back exactly as it was.
+- **Rearrange your tiles.** Open the menu (⋮), tap **Edit**, then press and hold a tile for about half a second and drag it where you want. Folders stay in alphabetical order. Re-importing an account resets that account's custom tile order and colors.
 - **Updates are automatic.** When a new version is ready, you'll see a small "tap to reload" message. Tap it and you're up to date.
 
 ## How this app was made

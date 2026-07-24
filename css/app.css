@@ -1,6 +1,8 @@
 /* =========================================================================
    Bookmark Launcher — app.css
-   Token system + component styles. Light default, dark via prefers-color-scheme.
+   Token system + component styles. Light default, dark via [data-theme="dark"]
+   (resolved from settings + system preference by app.js; see the FOUC guard in
+   index.html and applyTheme()).
    ========================================================================= */
 
 /* ---------- Design tokens ---------- */
@@ -74,25 +76,23 @@
   --z-toast: 1000;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0f1115;
-    --bg-elevated: #1a1d24;
-    --bg-sunken: #24272f;
-    --text: #eef0f4;
-    --text-muted: #a4a9b6;
-    --text-faint: #6d7382;
-    --border: #2a2e37;
-    --border-strong: #3a3f4b;
-    --accent-tint: #222a44;
-    --accent-text: #9fb0f8;
-    --danger: #e5564f;
-    --danger-tint: #3a2020;
-    --focus-ring: #7b8ff4;
-    --scrim: rgba(0, 0, 0, .55);
-    --shadow-1: 0 1px 2px rgba(0, 0, 0, .40);
-    --shadow-2: 0 12px 34px rgba(0, 0, 0, .55), 0 2px 8px rgba(0, 0, 0, .4);
-  }
+:root[data-theme="dark"] {
+  --bg: #0f1115;
+  --bg-elevated: #1a1d24;
+  --bg-sunken: #24272f;
+  --text: #eef0f4;
+  --text-muted: #a4a9b6;
+  --text-faint: #6d7382;
+  --border: #2a2e37;
+  --border-strong: #3a3f4b;
+  --accent-tint: #222a44;
+  --accent-text: #9fb0f8;
+  --danger: #e5564f;
+  --danger-tint: #3a2020;
+  --focus-ring: #7b8ff4;
+  --scrim: rgba(0, 0, 0, .55);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .40);
+  --shadow-2: 0 12px 34px rgba(0, 0, 0, .55), 0 2px 8px rgba(0, 0, 0, .4);
 }
 
 /* ---------- Reset / base ---------- */
@@ -365,9 +365,7 @@ img { max-width: 100%; }
 }
 .tile--hasicon .tile__letter { display: none; }
 
-@media (prefers-color-scheme: dark) {
-  .tile__letter { background: hsl(var(--tile-hue, 220) 50% 52%); }
-}
+[data-theme="dark"] .tile__letter { background: hsl(var(--tile-hue, 220) 50% 52%); }
 
 /* Folder tile */
 .tile__icon--folder { background: var(--accent-tint); }
@@ -440,6 +438,61 @@ img { max-width: 100%; }
 .launcher.is-editing .tile { animation: wiggle .32s ease-in-out infinite; }
 .launcher.is-editing .grid__item:nth-child(2n) .tile { animation-delay: .08s; }
 .launcher.is-editing .grid__item:nth-child(3n) .tile { animation-delay: .16s; }
+
+/* ---------- Drag-to-rearrange (§5) ---------- */
+/* Edit mode surrenders vertical swipe-scroll ON a link tile so the drag gesture
+   owns the pointer; scroll instead via folder tiles, gaps, or autoscroll. */
+.launcher.is-editing .grid__item[data-kind="link"] { touch-action: none; }
+
+/* The source tile becomes a faint, still placeholder while its ghost is dragged. */
+.grid__item--drag-source .tile { opacity: .35; animation: none; }
+
+/* The floating clone that rides the finger. Transform (translate3d + scale) is
+   set inline by JS; it sits just above toasts and never intercepts hit-tests. */
+#drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  margin: 0;
+  pointer-events: none;
+  z-index: calc(var(--z-toast) + 1);
+  box-shadow: var(--shadow-2);
+  border-radius: var(--radius-lg);
+  will-change: transform;
+}
+#drag-ghost .tile { animation: none; width: 100%; }
+
+/* ---------- Frequently used row (§6) ---------- */
+.frequent {
+  --tile-icon: 52px;
+  border-bottom: 1px solid var(--border);
+}
+.frequent__title {
+  margin: 0;
+  padding: var(--space-3) var(--space-4) 0;
+  padding-left: calc(var(--space-4) + env(safe-area-inset-left));
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.frequent__scroll {
+  display: flex;
+  gap: var(--grid-gap);
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  padding-left: calc(var(--space-4) + env(safe-area-inset-left));
+  padding-right: calc(var(--space-4) + env(safe-area-inset-right));
+  list-style: none;
+}
+.frequent__scroll::-webkit-scrollbar { display: none; }
+.frequent .grid__item {
+  flex: 0 0 var(--tile-min);
+  content-visibility: visible;
+}
+.frequent .tile__more { display: none; }
 
 /* ---------- Empty / no-results ---------- */
 .empty-state {
@@ -753,6 +806,117 @@ select.field__input { padding-right: var(--space-2); }
 }
 .help li { margin-bottom: var(--space-1); }
 .help strong { color: var(--text); }
+
+/* ---------- Settings ---------- */
+.segmented {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  background: var(--bg-sunken);
+  border-radius: var(--radius-md);
+}
+.segmented__btn {
+  flex: 1 1 0;
+  min-height: 36px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+.segmented__btn[aria-checked="true"] {
+  background: var(--accent-tint);
+  color: var(--accent-text);
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  cursor: pointer;
+}
+.switch-row__text {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.switch-row__title { font-weight: 600; }
+.switch-row__note {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+.switch {
+  flex: 0 0 auto;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 51px;
+  height: 31px;
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+  position: relative;
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease);
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 27px;
+  height: 27px;
+  border-radius: var(--radius-full);
+  background: #fff;
+  box-shadow: var(--shadow-1);
+  transition: transform var(--dur-2) var(--ease);
+}
+.switch:checked { background: var(--accent); }
+.switch:checked::after { transform: translateX(20px); }
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+/* ---------- Bookmark modal: nested-folder create + colour swatches ---------- */
+#bookmark-newfolder {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.swatch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.swatch {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 2px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-sunken);
+  cursor: pointer;
+}
+.swatch--auto {
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+}
+.swatch[aria-checked="true"] {
+  border-color: var(--bg-elevated);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
 
 /* ---------- Toasts ---------- */
 .toast-region {

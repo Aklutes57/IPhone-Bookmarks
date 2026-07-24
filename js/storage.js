@@ -31,12 +31,21 @@
  * @property {string} [icon]
  * @property {number|null} addDate
  * @property {number} order
+ * @property {number} [hueOverride]
+ */
+
+/**
+ * @typedef {Object} Usage
+ * @property {string} key    // the exact bookmark URL string
+ * @property {number} count
+ * @property {number} lastAt
  */
 
 const DB_NAME = 'bookmark-launcher';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_ACCOUNTS = 'accounts';
 const STORE_BOOKMARKS = 'bookmarks';
+const STORE_USAGE = 'usage';
 const INDEX_ACCOUNT_ID = 'accountId';
 
 /** @type {Promise<IDBDatabase>|null} */
@@ -46,7 +55,8 @@ let versionChangeHandler = null;
 
 /**
  * Register (or clear with null) a handler invoked when another tab requests a
- * version change. Forward-compat; inert at DB_VERSION 1.
+ * version change. This connection is closed first; the handler lets app.js
+ * surface a reload prompt.
  * @param {((event: IDBVersionChangeEvent) => void)|null} fn
  */
 export function setVersionChangeHandler(fn) {
@@ -110,6 +120,9 @@ function getDB() {
         db.createObjectStore(STORE_ACCOUNTS, { keyPath: 'id' });
         const bookmarks = db.createObjectStore(STORE_BOOKMARKS, { keyPath: 'id' });
         bookmarks.createIndex(INDEX_ACCOUNT_ID, 'accountId', { unique: false });
+      }
+      if (event.oldVersion < 2) {
+        db.createObjectStore(STORE_USAGE, { keyPath: 'key' });
       }
     });
     request.addEventListener('success', () => {
@@ -254,6 +267,75 @@ export async function deleteAccountCascade(accountId) {
       accountsStore.delete(accountId);
     }
   });
+  return txDone(tx);
+}
+
+/**
+ * @returns {Promise<Usage[]>} all usage records, in store order (unsorted).
+ */
+export async function getAllUsage() {
+  const db = await getDB();
+  const tx = db.transaction(STORE_USAGE, 'readonly');
+  return promisify(tx.objectStore(STORE_USAGE).getAll());
+}
+
+/**
+ * Upsert one usage record. Caller supplies the fully-formed {key, count, lastAt}.
+ * @param {Usage} record
+ * @returns {Promise<void>}
+ */
+export async function putUsage(record) {
+  const db = await getDB();
+  const tx = db.transaction(STORE_USAGE, 'readwrite');
+  tx.objectStore(STORE_USAGE).put(record);
+  return txDone(tx);
+}
+
+/**
+ * Delete many usage records by key in ONE transaction.
+ * @param {string[]} keys
+ * @returns {Promise<void>}
+ */
+export async function deleteUsageKeys(keys) {
+  const db = await getDB();
+  const tx = db.transaction(STORE_USAGE, 'readwrite');
+  const store = tx.objectStore(STORE_USAGE);
+  for (const key of keys) store.delete(key);
+  return txDone(tx);
+}
+
+/**
+ * Atomically replace the ENTIRE database (accounts, bookmarks, usage) in ONE
+ * transaction across all three stores: each store is cleared, then every
+ * supplied record is put synchronously. Restore primitive for full backups.
+ * If a record cannot be structured-cloned (e.g. a poisoned value) the put
+ * throws synchronously; the transaction is aborted so nothing commits and the
+ * returned promise rejects — pre-call contents are preserved. Callers supply
+ * fully-formed, validated records.
+ * @param {Account[]} accounts
+ * @param {Bookmark[]} bookmarks
+ * @param {Usage[]} usage
+ * @returns {Promise<void>}
+ */
+export async function replaceAll(accounts, bookmarks, usage) {
+  const db = await getDB();
+  const tx = db.transaction([STORE_ACCOUNTS, STORE_BOOKMARKS, STORE_USAGE], 'readwrite');
+  const accountsStore = tx.objectStore(STORE_ACCOUNTS);
+  const bookmarksStore = tx.objectStore(STORE_BOOKMARKS);
+  const usageStore = tx.objectStore(STORE_USAGE);
+  try {
+    accountsStore.clear();
+    bookmarksStore.clear();
+    usageStore.clear();
+    for (const account of accounts) accountsStore.put(account);
+    for (const bookmark of bookmarks) bookmarksStore.put(bookmark);
+    for (const record of usage) usageStore.put(record);
+  } catch (err) {
+    // A synchronous put failure (e.g. DataCloneError) leaves the transaction
+    // active; abort it so the cleared/partial writes never commit.
+    try { tx.abort(); } catch { /* already inactive/aborting */ }
+    return txDone(tx);
+  }
   return txDone(tx);
 }
 

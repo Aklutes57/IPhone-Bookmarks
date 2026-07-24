@@ -6,8 +6,8 @@
   <title>Bookmark Launcher</title>
   <meta name="description" content="Your Chrome bookmarks as a phone-style app launcher.">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+  <meta id="meta-theme-light" name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+  <meta id="meta-theme-dark" name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
   <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
   <link rel="icon" href="./icons/icon-192.png" sizes="192x192" type="image/png">
   <link rel="apple-touch-icon" href="./icons/icon-180.png">
@@ -16,6 +16,11 @@
   <meta name="apple-mobile-web-app-title" content="Bookmarks">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <link rel="manifest" href="./manifest.webmanifest">
+  <script>
+    // FOUC guard: resolve and apply the theme before the stylesheet loads.
+    // (The one sanctioned inline script — kept tiny.)
+    (function(){try{var s=JSON.parse(localStorage.getItem('bl.settings')||'{}');var t=(s.theme==='light'||s.theme==='dark')?s.theme:(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.dataset.theme=t;document.documentElement.style.colorScheme=t;}catch(e){}})();
+  </script>
   <link rel="stylesheet" href="./css/app.css">
   <script type="module" src="./js/app.js"></script>
 </head>
@@ -46,6 +51,10 @@
       <h2 id="folder-title" class="breadcrumb__title"></h2>
     </div>
     <section id="launcher" class="launcher" role="tabpanel" aria-label="Bookmarks">
+      <section id="frequent-row" class="frequent" hidden aria-label="Frequently used">
+        <h2 class="frequent__title">Frequently used</h2>
+        <ul id="frequent-list" class="frequent__scroll" role="list"></ul>
+      </section>
       <ul id="grid" class="grid" role="list" aria-label="Bookmarks"></ul>
       <div id="no-results" class="no-results" hidden role="status">
         No bookmarks match <span id="no-results-term"></span>.
@@ -66,6 +75,7 @@
     <button id="menu-add-bookmark" class="menu__item" role="menuitem" type="button">Add bookmark…</button>
     <button id="menu-toggle-edit" class="menu__item" role="menuitem" type="button" aria-pressed="false">Edit</button>
     <button id="menu-manage-accounts" class="menu__item" role="menuitem" type="button">Manage accounts…</button>
+    <button id="menu-settings" class="menu__item" role="menuitem" type="button">Settings…</button>
     <hr class="menu__sep">
     <button id="menu-help" class="menu__item" role="menuitem" type="button">Help</button>
   </div>
@@ -120,9 +130,30 @@
         <label class="field__label" for="bookmark-folder-select">Folder</label>
         <select id="bookmark-folder-select" class="field__input"></select>
       </div>
-      <div id="bookmark-newfolder" class="field" hidden>
-        <label class="field__label" for="bookmark-newfolder-input">New folder name</label>
-        <input id="bookmark-newfolder-input" class="field__input" type="text">
+      <div id="bookmark-newfolder" hidden>
+        <div class="field">
+          <label class="field__label" for="bookmark-newfolder-parent">Inside</label>
+          <select id="bookmark-newfolder-parent" class="field__input"></select>
+        </div>
+        <div class="field">
+          <label class="field__label" for="bookmark-newfolder-input">New folder name</label>
+          <input id="bookmark-newfolder-input" class="field__input" type="text">
+        </div>
+      </div>
+      <div id="bookmark-color-field" class="field" hidden>
+        <span class="field__label">Tile color</span>
+        <div id="bookmark-color-row" class="swatch-row" role="radiogroup" aria-label="Tile color">
+          <button type="button" class="swatch swatch--auto" role="radio" data-hue="" aria-checked="true" aria-label="Automatic color">A</button>
+          <button type="button" class="swatch" role="radio" data-hue="0" aria-checked="false" aria-label="Red"></button>
+          <button type="button" class="swatch" role="radio" data-hue="30" aria-checked="false" aria-label="Orange"></button>
+          <button type="button" class="swatch" role="radio" data-hue="60" aria-checked="false" aria-label="Yellow"></button>
+          <button type="button" class="swatch" role="radio" data-hue="120" aria-checked="false" aria-label="Green"></button>
+          <button type="button" class="swatch" role="radio" data-hue="170" aria-checked="false" aria-label="Teal"></button>
+          <button type="button" class="swatch" role="radio" data-hue="210" aria-checked="false" aria-label="Blue"></button>
+          <button type="button" class="swatch" role="radio" data-hue="260" aria-checked="false" aria-label="Purple"></button>
+          <button type="button" class="swatch" role="radio" data-hue="310" aria-checked="false" aria-label="Pink"></button>
+        </div>
+        <p class="dialog__note">Used when a site has no logo.</p>
       </div>
       <p id="bookmark-error" class="field__error" role="alert" hidden></p>
       <footer class="dialog__footer">
@@ -138,6 +169,7 @@
     <div class="action-list" role="group" aria-label="Item actions">
       <button id="action-open" class="action-list__item" type="button">Open in new tab</button>
       <button id="action-edit" class="action-list__item" type="button">Edit</button>
+      <button id="action-move" class="action-list__item" type="button">Move</button>
       <button id="action-delete" class="action-list__item action-list__item--danger" type="button">Delete</button>
     </div>
     <button id="action-cancel" class="btn btn--ghost btn--block" type="button">Cancel</button>
@@ -185,6 +217,7 @@
         <li>Choose <strong>Export bookmarks</strong>.</li>
         <li>Chrome saves a single file ending in <strong>.html</strong>. Pick somewhere easy to find, like your Desktop.</li>
       </ol>
+      <p>This also works with bookmark files exported from Safari, Firefox, or Edge — the steps are the same, just use that browser's Export Bookmarks option.</p>
 
       <h3>Step 2: Get the file onto your phone</h3>
       <p>Now send that file to the phone you are reading this on. Any way you like works:</p>
@@ -213,10 +246,71 @@
       <h3>What about my passwords?</h3>
       <p>This app never sees, asks for, or stores any of your passwords. It only knows the name and web address of each bookmark. When you tap a tile, the page opens in your normal browser, and Chrome fills in your logins exactly the way it always does. Your accounts stay as safe as they were before.</p>
 
+      <h3>Frequently used</h3>
+      <p>To show the Frequently used row, the app counts how often you tap each tile. That count is stored only on this phone, is never sent anywhere, and disappears if you clear the app's data.</p>
+
+      <h3>Settings</h3>
+      <p>Tap the three-dot menu (⋮) at the top right and choose <strong>Settings</strong> to change how the app looks and behaves.</p>
+      <p><strong>Appearance.</strong> Choose <strong>System</strong>, <strong>Light</strong>, or <strong>Dark</strong>. System follows whatever your phone is already set to. Light and Dark keep the app in that look no matter what your phone does.</p>
+      <p><strong>Open links in Chrome.</strong> This choice appears on iPhone only. Turn it on and your tiles open in the Chrome app instead of Safari. If you tap a tile and nothing happens, Chrome may not be installed on your phone, so the app will offer to open the site here instead.</p>
+
+      <h3>Back up your bookmarks</h3>
+      <p>Settings also lets you save a copy of everything in the app, so you can put it back later or move it to another phone.</p>
+      <p><strong>Save backup.</strong> In Settings, tap <strong>Save backup</strong>. On iPhone the Share sheet appears, so choose <strong>Save to Files</strong> to keep the file on your phone, or send it to yourself with AirDrop or email.</p>
+      <p><strong>Restore backup.</strong> Tap <strong>Restore backup</strong> and pick the file you saved. This replaces everything on this phone with the backup, exactly as it was when you saved it.</p>
+      <p>It is worth keeping a backup somewhere safe, especially on iPhone, where stored data can be cleared when an app has not been opened for a while.</p>
+
+      <h3>Rearranging tiles</h3>
+      <p>You can put your tiles in whatever order you like.</p>
+      <ol>
+        <li>Tap the three-dot menu (⋮) and choose <strong>Edit</strong>.</li>
+        <li>Press and hold a tile for about half a second, then drag it where you want and let go.</li>
+      </ol>
+      <p>Folders always stay together in alphabetical order, so you are arranging the site tiles around them. This works when you have a single account selected, not the <strong>All</strong> view. If you later re-import an account to refresh it, that account's custom tile order and any tile colours you picked are reset.</p>
+
       <h3>Troubleshooting</h3>
       <p><strong>Some tiles show a letter instead of a logo.</strong> That is completely normal. When a website does not offer a clear icon, we show the first letter of its name on a coloured tile instead. The bookmark still works the same way.</p>
       <p><strong>My bookmarks disappeared on iPhone.</strong> iPhones sometimes clear stored data for web apps that have not been opened in a while. If that happens, just import your bookmarks file again using the steps above and everything comes back.</p>
       <p><strong>The file would not import.</strong> Make sure you chose the <strong>.html</strong> file that Chrome exported, not a screenshot or a different document. If in doubt, export a fresh copy from your computer and try again.</p>
+    </div>
+  </dialog>
+
+  <dialog id="settings-sheet" class="sheet" aria-labelledby="settings-title">
+    <div class="sheet__grabber"></div>
+    <header class="dialog__header">
+      <h2 id="settings-title" class="dialog__title">Settings</h2>
+      <button id="settings-close" class="dialog__close icon-btn" type="button" aria-label="Close">✕</button>
+    </header>
+    <div class="dialog__body">
+      <div class="field">
+        <span class="field__label" id="theme-label">Appearance</span>
+        <div id="theme-choice" class="segmented" role="radiogroup" aria-labelledby="theme-label">
+          <button class="segmented__btn" type="button" role="radio" data-theme-value="system" aria-checked="false">System</button>
+          <button class="segmented__btn" type="button" role="radio" data-theme-value="light" aria-checked="false">Light</button>
+          <button class="segmented__btn" type="button" role="radio" data-theme-value="dark" aria-checked="false">Dark</button>
+        </div>
+      </div>
+      <div id="settings-chrome-row" class="field" hidden>
+        <label class="switch-row" for="settings-chrome-toggle">
+          <span class="switch-row__text">
+            <span class="switch-row__title">Open links in Chrome</span>
+            <span class="switch-row__note">Tiles open in the Chrome app instead of Safari.</span>
+          </span>
+          <input id="settings-chrome-toggle" class="switch" type="checkbox">
+        </label>
+        <p id="settings-chrome-note" class="dialog__note" hidden>If nothing happens when you tap a tile, Chrome may not be installed.</p>
+        <button id="settings-chrome-test" class="btn btn--ghost" type="button">Test it</button>
+      </div>
+      <div class="field">
+        <span class="field__label">Backup</span>
+        <div class="settings-actions">
+          <button id="settings-backup-btn" class="btn" type="button">Save backup…</button>
+          <button id="settings-restore-btn" class="btn btn--ghost" type="button">Restore backup…</button>
+          <input id="settings-restore-input" class="visually-hidden" type="file" accept=".json,application/json">
+        </div>
+        <p id="settings-backup-status" class="dialog__note">Never backed up.</p>
+        <p id="settings-restore-error" class="field__error" role="alert" hidden></p>
+      </div>
     </div>
   </dialog>
 
